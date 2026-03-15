@@ -1,0 +1,11 @@
+[Unit]
+Description=Session Search - Periodic indexing timer
+Requires=session-search.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

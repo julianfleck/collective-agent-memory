@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "collective-agent-memory"
+version = "0.2.0"
+description = "Collective memory for AI coding agents - segment, search, and sync sessions across machines"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Julian Fleck", email = "spot@julianfleck.net" }
+]
+keywords = ["claude", "openclaw", "codex", "agent", "memory", "session", "search", "embeddings"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "sentence-transformers>=2.0.0",
+    "numpy>=1.20.0",
+    "pyyaml>=6.0",
+    "typer>=0.9.0",
+    "keybert>=0.8.0",
+    "watchdog>=3.0.0",
+    "rich>=13.0.0",
+    "gliner2>=1.0.0",
+    "urllib3>=2.0.0",
+    "requests>=2.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+plot = [
+    "matplotlib>=3.5.0",
+]
+
+[project.scripts]
+cam = "cam.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/julianfleck/collective-agent-memory"
+Repository = "https://github.com/julianfleck/collective-agent-memory"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cam"]
+artifacts = ["src/cam/SKILL.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

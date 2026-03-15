@@ -1,0 +1,12 @@
+[Unit]
+Description=Session Search - Index new session files
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/session-search index-new
+Environment=SESSION_SEARCH_OUTPUT_DIR=%h/.openclaw/workspace/sessions
+Environment=SESSION_SEARCH_SESSIONS_DIR=%h/.openclaw/agents/main/sessions
+
+[Install]
+WantedBy=default.target
