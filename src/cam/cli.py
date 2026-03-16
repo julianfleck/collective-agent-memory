@@ -397,6 +397,58 @@ def filter_search_results(
     return filtered
 
 
+def format_results_for_json(results: list, workspace_dir: Path = None) -> list:
+    """Transform results into clean JSON format with useful fields.
+
+    Transforms qmd's raw output into a more usable format:
+    - path: clean relative path (agent@machine/date/file.md)
+    - date: extracted date (YYYY-MM-DD)
+    - agent: agent name
+    - machine: machine name
+    - title: section title
+    - score: relevance score
+    """
+    if workspace_dir is None:
+        workspace_dir = get_workspace_dir()
+
+    formatted = []
+    for result in results:
+        qmd_path = result.get('file', '')
+        # Clean path: qmd://sessions/claude-wintermute/... -> claude@wintermute/...
+        path = qmd_path.replace('qmd://sessions/', '')
+        # Fix the agent-machine separator (qmd uses - but we use @)
+        parts = path.split('/')
+        if len(parts) >= 2:
+            # First part is agent-machine, convert to agent@machine
+            agent_machine = parts[0]
+            if '-' in agent_machine and '@' not in agent_machine:
+                # Split on first hyphen only (machine might have hyphens)
+                idx = agent_machine.index('-')
+                agent = agent_machine[:idx]
+                machine = agent_machine[idx+1:]
+                parts[0] = f"{agent}@{machine}"
+                path = '/'.join(parts)
+
+        # Extract fields from path
+        agent = machine = date = ""
+        if len(parts) >= 2:
+            agent_machine = parts[0]
+            if '@' in agent_machine:
+                agent, machine = agent_machine.split('@', 1)
+            date = parts[1] if len(parts) > 1 else ""
+
+        formatted.append({
+            "path": path,
+            "date": date,
+            "agent": agent,
+            "machine": machine,
+            "title": result.get('title', ''),
+            "score": result.get('score', 0),
+        })
+
+    return formatted
+
+
 def display_results(results: list, workspace_dir: Path = None) -> None:
     """Display filtered results with dates."""
     if workspace_dir is None:
@@ -507,10 +559,18 @@ def _run_qmd_search(query: str, mode: str, collection: str = "sessions",
 
             # Output in requested format
             if json_output:
-                print(json.dumps(filtered, indent=2))
+                formatted = format_results_for_json(filtered, get_workspace_dir())
+                print(json.dumps(formatted, indent=2))
             elif files_output:
                 for r in filtered:
-                    print(r.get('file', '').replace('qmd://sessions/', ''))
+                    path = r.get('file', '').replace('qmd://sessions/', '')
+                    # Fix agent-machine separator
+                    parts = path.split('/')
+                    if parts and '-' in parts[0] and '@' not in parts[0]:
+                        idx = parts[0].index('-')
+                        parts[0] = parts[0][:idx] + '@' + parts[0][idx+1:]
+                        path = '/'.join(parts)
+                    print(path)
             else:
                 if filtered:
                     display_results(filtered)

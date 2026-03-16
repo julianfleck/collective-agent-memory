@@ -74,6 +74,26 @@ cam update              # Update CAM to latest version
 | `--json` | JSON output for scripting |
 | `--files` | File paths only |
 
+## JSON Output
+
+```bash
+cam search "api" -t 1d --json
+```
+
+Returns:
+```json
+[
+  {
+    "path": "claude@wintermute/2026-03-16/03-api-design.md",
+    "date": "2026-03-16",
+    "agent": "claude",
+    "machine": "wintermute",
+    "title": "Section 3: Api Design",
+    "score": 0.85
+  }
+]
+```
+
 ## Reading Results
 
 After searching, read the full segment:
