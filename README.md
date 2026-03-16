@@ -44,11 +44,11 @@ The installer + `cam init` writes the required `CAM_*` config automatically, so 
 ### Basic Search
 
 ```bash
-cam "authentication flow"              # keyword search (fast, default)
-cam search "authentication flow"       # same thing, explicit
+cam "authentication flow"              # hybrid search with reranking (default)
+cam query "authentication flow"        # same thing, explicit
 
+cam search "error handling"            # keyword search (fast)
 cam vsearch "how to deploy"            # semantic search (vector similarity)
-cam query "error handling"             # hybrid + reranking (best quality)
 ```
 
 ### Time Filters
@@ -125,10 +125,10 @@ cam search "auth" -t 2h -a claude -n 20
 
 | Command               | Description                                     |
 | --------------------- | ----------------------------------------------- |
-| `cam "query"`         | Keyword search (fast, default)                  |
-| `cam search "query"`  | Same as above, explicit                         |
+| `cam "query"`         | Hybrid search with reranking (default)          |
+| `cam query "query"`   | Same as above, explicit                         |
+| `cam search "query"`  | Keyword search (fast)                           |
 | `cam vsearch "query"` | Semantic search (vector similarity)             |
-| `cam query "query"`   | Hybrid + reranking (best quality)               |
 | `cam entity "name"`   | Search by extracted entity (tools, files, etc.) |
 | `cam [15min]`         | List recent session segments (no search query)  |
 | `cam recent`          | List session segments from last 24h             |

@@ -1278,12 +1278,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 Collective Agent Memory {version_str}
 
 Search:
-  cam "query"              Keyword search (fast, default)
+  cam "query"              Hybrid search with reranking (default)
   cam "query" [2h]         Search with time filter
   cam @claude "query"      Search specific agent
-  cam search "query"       Explicit keyword search
+  cam search "query"       Keyword search (fast)
   cam vsearch "query"      Semantic search (vector similarity)
-  cam query "query"        Hybrid + reranking (best quality)
+  cam query "query"        Explicit hybrid + reranking
   cam entity "name"        Search by entity (tools, files, concepts)
 
 Browse:
@@ -1412,8 +1412,8 @@ Output:  -n NUM (result count), --json, --files
                 new_argv.extend(["--agent", agent])
             argv = new_argv
         else:
-            # Rebuild argv with parsed filters as proper arguments for search
-            new_argv = ["search"]
+            # Rebuild argv with parsed filters as proper arguments for query (hybrid search)
+            new_argv = ["query"]
             if query:
                 new_argv.append(query)
             else:
