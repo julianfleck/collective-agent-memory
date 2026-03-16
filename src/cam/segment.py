@@ -15,7 +15,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 import argparse
 import sys
 
@@ -232,6 +232,21 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
         try:
             mtime = session_path.stat().st_mtime
             session_meta["started"] = datetime.fromtimestamp(mtime).isoformat()
+        except (OSError, ValueError):
+            pass
+
+    # Backfill timestamps for messages without them using file mtime
+    if messages and not any(m.get("timestamp") for m in messages):
+        try:
+            mtime = session_path.stat().st_mtime
+            # Use mtime as base, spread messages across a reasonable window
+            base_time = datetime.fromtimestamp(mtime)
+            for i, msg in enumerate(messages):
+                if not msg.get("timestamp"):
+                    # Spread messages backwards from mtime (most recent = mtime)
+                    offset_minutes = (len(messages) - 1 - i) * 2  # 2 min per message
+                    msg_time = base_time - timedelta(minutes=offset_minutes)
+                    msg["timestamp"] = msg_time.isoformat()
         except (OSError, ValueError):
             pass
 
