@@ -397,24 +397,55 @@ def filter_search_results(
     return filtered
 
 
-def display_results(results: list) -> None:
-    """Display filtered results in qmd-like format."""
+def display_results(results: list, workspace_dir: Path = None) -> None:
+    """Display filtered results with dates."""
+    if workspace_dir is None:
+        workspace_dir = get_workspace_dir()
+
     for r in results:
         filepath = r.get('file', '').replace('qmd://sessions/', '')
         score = r.get('score', 0)
         title = r.get('title', '')
         docid = r.get('docid', '')
-        snippet = r.get('snippet', '')
 
-        # Format similar to qmd output
-        console.print(f"qmd://sessions/{filepath}:{docid.lstrip('#')} [dim]#{docid.lstrip('#')}[/dim]")
-        console.print(f"[bold]Title: {title}[/bold]")
-        console.print(f"Score: [green]{score:.0%}[/green]")
-        if snippet:
-            # Show first few lines of snippet
-            lines = snippet.split('\n')[:4]
-            for line in lines:
-                console.print(f"[dim]{line}[/dim]")
+        # Extract date from path or read from file
+        date_str = ""
+        parts = filepath.split('/')
+        if len(parts) >= 2:
+            # Path format: agent-machine/YYYY-MM-DD/file.md
+            for part in parts:
+                if part.startswith('20') and len(part) == 10:
+                    date_str = part
+                    break
+
+        # Try to get timestamp from file for more precision
+        timestamp_str = ""
+        local_path = qmd_path_to_local(r.get('file', ''), workspace_dir)
+        if local_path.exists():
+            try:
+                with open(local_path) as f:
+                    content = f.read(3000)  # Frontmatter can be long with entities
+                    if content.startswith('---'):
+                        end = content.find('---', 3)
+                        if end > 0:
+                            frontmatter = yaml.safe_load(content[3:end])
+                            ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
+                            if ts:
+                                if isinstance(ts, datetime):
+                                    timestamp_str = ts.strftime("%Y-%m-%d %H:%M")
+                                elif isinstance(ts, str):
+                                    # Parse and format
+                                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+
+        # Use timestamp if available, otherwise date from path
+        display_date = timestamp_str or date_str
+
+        # Format output
+        console.print(f"[cyan]{display_date}[/cyan] [bold]{title}[/bold]")
+        console.print(f"  [dim]{filepath}[/dim]  [green]{score:.0%}[/green]")
         console.print()
 
 
@@ -497,8 +528,19 @@ def _run_qmd_search(query: str, mode: str, collection: str = "sessions",
 
 def cmd_search(args: argparse.Namespace) -> int:
     """Keyword search (fast)."""
-    # Parse time filter if provided
+    query = args.query
     time_filter = None
+    agent_filter = getattr(args, 'agent', None)
+
+    # Check if query is actually a time filter like [15min]
+    if query and query.startswith('[') and query.endswith(']'):
+        try:
+            time_filter = parse_time_filter(query[1:-1])
+            query = None  # No actual query, just time filter
+        except ValueError:
+            pass  # Not a valid time filter, treat as literal query
+
+    # Parse explicit -t time filter
     if hasattr(args, 'time') and args.time:
         try:
             time_filter = parse_time_filter(args.time)
@@ -506,17 +548,120 @@ def cmd_search(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    # If no query but have time filter, list recent segments
+    if not query and time_filter:
+        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
+
+    if not query:
+        print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
+        return 1
+
     return _run_qmd_search(
-        args.query, "search", args.collection,
+        query, "search", args.collection,
         args.limit, args.json, args.files,
-        getattr(args, 'agent', None),
+        agent_filter,
         time_filter
     )
 
 
+def cmd_recent_with_filter(
+    time_filter: timedelta,
+    agent_filter: Optional[str],
+    limit: int,
+    json_output: bool,
+    files_output: bool
+) -> int:
+    """List recent segments matching time/agent filter (no search query)."""
+    workspace_dir = get_workspace_dir()
+    now = datetime.now(timezone.utc)
+    cutoff = now - time_filter
+
+    results = []
+
+    # Scan workspace for matching files
+    for agent_dir in workspace_dir.iterdir():
+        if not agent_dir.is_dir() or agent_dir.name.startswith('.'):
+            continue
+
+        # Agent filter
+        if agent_filter:
+            agent_name = agent_dir.name.split('@')[0]
+            if agent_name != agent_filter:
+                continue
+
+        for date_dir in agent_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+
+            for segment_file in date_dir.glob("*.md"):
+                try:
+                    with open(segment_file) as f:
+                        content = f.read(3000)  # Frontmatter can be long with entities
+                        if not content.startswith('---'):
+                            continue
+                        end = content.find('---', 3)
+                        if end <= 0:
+                            continue
+                        frontmatter = yaml.safe_load(content[3:end])
+
+                        # Get timestamp
+                        ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
+                        if ts:
+                            if isinstance(ts, datetime):
+                                segment_time = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                            elif isinstance(ts, str):
+                                segment_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                            else:
+                                continue
+
+                            if segment_time >= cutoff:
+                                results.append({
+                                    'file': f"qmd://sessions/{segment_file.relative_to(workspace_dir)}",
+                                    'title': frontmatter.get('title', segment_file.stem),
+                                    'timestamp': segment_time,
+                                    'score': 1.0
+                                })
+                except Exception:
+                    continue
+
+    # Sort by timestamp (most recent first)
+    results.sort(key=lambda x: x['timestamp'], reverse=True)
+
+    # Apply limit
+    results = results[:limit]
+
+    # Output
+    if json_output:
+        # Convert datetime to string for JSON
+        for r in results:
+            r['timestamp'] = r['timestamp'].isoformat()
+        print(json.dumps(results, indent=2))
+    elif files_output:
+        for r in results:
+            print(r['file'].replace('qmd://sessions/', ''))
+    else:
+        if results:
+            display_results(results, workspace_dir)
+        else:
+            console.print("[dim]No segments found in time range[/dim]")
+
+    return 0
+
+
 def cmd_vsearch(args: argparse.Namespace) -> int:
     """Semantic search (vector similarity)."""
+    query = args.query
     time_filter = None
+    agent_filter = getattr(args, 'agent', None)
+
+    # Check if query is actually a time filter like [15min]
+    if query and query.startswith('[') and query.endswith(']'):
+        try:
+            time_filter = parse_time_filter(query[1:-1])
+            query = None
+        except ValueError:
+            pass
+
     if hasattr(args, 'time') and args.time:
         try:
             time_filter = parse_time_filter(args.time)
@@ -524,17 +669,35 @@ def cmd_vsearch(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    if not query and time_filter:
+        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
+
+    if not query:
+        print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
+        return 1
+
     return _run_qmd_search(
-        args.query, "vsearch", args.collection,
+        query, "vsearch", args.collection,
         args.limit, args.json, args.files,
-        getattr(args, 'agent', None),
+        agent_filter,
         time_filter
     )
 
 
 def cmd_query(args: argparse.Namespace) -> int:
     """Hybrid search with reranking (best quality)."""
+    query = args.query
     time_filter = None
+    agent_filter = getattr(args, 'agent', None)
+
+    # Check if query is actually a time filter like [15min]
+    if query and query.startswith('[') and query.endswith(']'):
+        try:
+            time_filter = parse_time_filter(query[1:-1])
+            query = None
+        except ValueError:
+            pass
+
     if hasattr(args, 'time') and args.time:
         try:
             time_filter = parse_time_filter(args.time)
@@ -542,10 +705,17 @@ def cmd_query(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    if not query and time_filter:
+        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
+
+    if not query:
+        print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
+        return 1
+
     return _run_qmd_search(
-        args.query, "query", args.collection,
+        query, "query", args.collection,
         args.limit, args.json, args.files,
-        getattr(args, 'agent', None),
+        agent_filter,
         time_filter
     )
 
@@ -1329,7 +1499,7 @@ Output:  -n NUM (result count), --json, --files
 
     # Search commands
     def add_search_args(p):
-        p.add_argument("query", help="Search query")
+        p.add_argument("query", nargs='?', default=None, help="Search query (optional with -t)")
         p.add_argument("-c", "--collection", default="sessions")
         p.add_argument("-n", "--limit", type=int, help="Number of results")
         p.add_argument("--json", action="store_true", help="JSON output")
