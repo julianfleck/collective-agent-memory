@@ -109,7 +109,7 @@ def queue_pop() -> Optional[str]:
     Sessions are sorted by file modification time (most recent first) so that
     current work is indexed before backlog.
 
-    Skips sessions that are already indexed (can happen if queue persists across restarts).
+    Skips sessions that don't need indexing (already indexed and not modified).
 
     Returns:
         Path to session file, or None if queues are empty
@@ -121,15 +121,15 @@ def queue_pop() -> Optional[str]:
         if queue_file.exists():
             lines = [l for l in queue_file.read_text().strip().split('\n') if l]
             if lines:
-                # Filter out already indexed sessions
+                # Filter out sessions that don't need indexing
                 original_count = len(lines)
-                lines = [l for l in lines if l not in indexed]
+                lines = [l for l in lines if needs_reindex(l, indexed)]
 
                 if original_count != len(lines):
-                    log.debug(f"Filtered {original_count - len(lines)} already-indexed sessions from queue")
+                    log.debug(f"Filtered {original_count - len(lines)} up-to-date sessions from queue")
 
                 if not lines:
-                    # All were indexed, clear this queue file
+                    # All were up-to-date, clear this queue file
                     queue_file.write_text('')
                     continue
 
@@ -175,7 +175,7 @@ def queue_clear():
 
 
 def queue_clean() -> int:
-    """Remove already-indexed sessions from the queue.
+    """Remove up-to-date sessions from the queue.
 
     Returns:
         Number of entries removed
@@ -187,7 +187,8 @@ def queue_clean() -> int:
         if queue_file.exists():
             lines = [l for l in queue_file.read_text().strip().split('\n') if l]
             original_count = len(lines)
-            lines = [l for l in lines if l not in indexed]
+            # Keep only sessions that need (re)indexing
+            lines = [l for l in lines if needs_reindex(l, indexed)]
             removed = original_count - len(lines)
 
             if removed > 0:
@@ -237,19 +238,81 @@ def queue_stats_by_source() -> Dict[str, int]:
 # Indexed Sessions State
 # =============================================================================
 
-def get_indexed_sessions() -> Set[str]:
-    """Get set of already indexed session paths."""
+def get_indexed_sessions() -> Dict[str, float]:
+    """Get dict of indexed session paths -> mtime when indexed.
+
+    Format in file: path:mtime (one per line)
+    Also supports legacy format (path only) for backwards compatibility.
+    """
+    indexed = {}
     if STATE_FILE.exists():
-        return set(STATE_FILE.read_text().strip().split('\n'))
-    return set()
+        for line in STATE_FILE.read_text().strip().split('\n'):
+            if not line:
+                continue
+            # Try to parse as new format: path:mtime
+            # Split from right to handle paths that might contain colons
+            parts = line.rsplit(':', 1)
+            if len(parts) == 2:
+                mtime_str = parts[1]
+                # Check if the last part looks like a timestamp (numeric, possibly with decimal)
+                if mtime_str.replace('.', '').isdigit() and len(mtime_str) > 8:
+                    indexed[parts[0]] = float(mtime_str)
+                    continue
+            # Legacy format - path only, use mtime=0
+            indexed[line] = 0.0
+    return indexed
 
 
 def mark_session_indexed(path: str):
-    """Mark a session as indexed."""
+    """Mark a session as indexed with current mtime."""
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     indexed = get_indexed_sessions()
-    indexed.add(path)
-    STATE_FILE.write_text('\n'.join(sorted(indexed)))
+
+    # Get current mtime
+    try:
+        mtime = Path(path).stat().st_mtime
+    except (OSError, FileNotFoundError):
+        mtime = time.time()
+
+    indexed[path] = mtime
+
+    # Write in new format
+    lines = [f"{p}:{m}" for p, m in sorted(indexed.items())]
+    STATE_FILE.write_text('\n'.join(lines))
+
+
+def needs_reindex(path: str, indexed: Dict[str, float]) -> bool:
+    """Check if a session needs (re)indexing based on mtime.
+
+    For sessions that were already indexed, we only re-index if:
+    1. File has been modified since last index
+    2. File hasn't been modified in the last minute (quick debounce)
+
+    This prevents constant re-indexing of rapidly-changing sessions.
+    """
+    if path not in indexed:
+        return True  # Never indexed
+
+    indexed_mtime = indexed[path]
+    if indexed_mtime == 0:
+        return False  # Legacy entry, don't re-index
+
+    try:
+        stat = Path(path).stat()
+        current_mtime = stat.st_mtime
+        now = time.time()
+
+        # Must be modified since last index
+        if current_mtime <= indexed_mtime + 60:
+            return False  # Not modified
+
+        # Must be "quiet" for at least 60 seconds (quick debounce)
+        if now - current_mtime < 60:
+            return False  # Still active
+
+        return True
+    except (OSError, FileNotFoundError):
+        return False
 
 
 class SessionWatcher(FileSystemEventHandler):
@@ -286,6 +349,9 @@ class SessionWatcher(FileSystemEventHandler):
         now = datetime.now()
         to_queue = []
 
+        # Refresh indexed sessions to pick up worker updates
+        self.indexed = get_indexed_sessions()
+
         for path in list(self.pending_paths):
             last_change = self.last_change.get(path)
             if not last_change:
@@ -294,8 +360,8 @@ class SessionWatcher(FileSystemEventHandler):
             # Wait for debounce period
             idle_time = (now - last_change).total_seconds()
             if idle_time >= DEBOUNCE_SECONDS:
-                # Check if already indexed
-                if path not in self.indexed:
+                # Check if needs (re)indexing based on mtime
+                if needs_reindex(path, self.indexed):
                     to_queue.append(path)
                 self.pending_paths.discard(path)
                 del self.last_change[path]

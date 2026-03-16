@@ -582,6 +582,42 @@ last_timestamp: {last_msg.get('timestamp', '')}
     return frontmatter + content
 
 
+def cleanup_session_segments(output_dir: Path, source_path: str) -> int:
+    """Remove existing segments for a session before re-indexing.
+
+    Scans all .md files in output_dir recursively and deletes those
+    whose 'source:' field in frontmatter matches the given source_path.
+
+    Returns:
+        Number of files deleted
+    """
+    deleted = 0
+    if not output_dir.exists():
+        return 0
+
+    for md_file in output_dir.rglob("*.md"):
+        try:
+            # Quick check: read first 1000 chars for frontmatter
+            content = md_file.read_text()[:1000]
+            if not content.startswith("---"):
+                continue
+
+            # Find source field
+            for line in content.split('\n'):
+                if line.startswith('source:'):
+                    file_source = line.split(':', 1)[1].strip()
+                    if file_source == source_path:
+                        md_file.unlink()
+                        deleted += 1
+                    break
+                if line == '---' and content.index(line) > 0:
+                    break  # End of frontmatter
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    return deleted
+
+
 def write_sections(
     messages: List[Dict],
     sections: List[Tuple[int, int]],
@@ -608,6 +644,14 @@ def write_sections(
     # Build output path: {agent}@{machine}/{date}/
     agent = session_meta.get("agent", "unknown")
     agent_machine_dir = output_dir / f"{agent}@{machine_id}" / session_date
+
+    # Clean up existing segments for this session before writing new ones
+    # This prevents duplicate/orphaned segments on re-indexing
+    source_path = session_meta.get("source_path", "")
+    if source_path and not dry_run:
+        deleted = cleanup_session_segments(output_dir, source_path)
+        if deleted > 0:
+            print(f"  Cleaned up {deleted} existing segment(s) for re-indexing")
 
     written_files = []
 
