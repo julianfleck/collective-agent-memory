@@ -10,67 +10,69 @@ Search past sessions to find previous work, decisions, code patterns, or context
 ## Search Commands
 
 ```bash
-# Keyword search (fast)
-cam search "authentication flow"
-cam "authentication flow"              # shorthand
+# Quick search (hybrid with reranking - best quality)
+cam "authentication flow"
+cam "error handling" -t 2h             # with time filter
+cam "API design" -n 20                 # more results
+
+# Keyword search (fast, uses qmd)
+cam search "authentication flow" -t 1d
 
 # Semantic search (vector similarity)
-cam vsearch "how to handle user login"
+cam vsearch "how to handle user login" -t 3d
 
-# Hybrid search with reranking (best quality)
-cam query "error handling patterns"
+# Hybrid search with reranking (explicit)
+cam query "error handling patterns" -t 2h
 
-# Entity search (find by tool, file, decision, etc.)
+# Entity search (find by tool, file, concept)
 cam entity "docker"                    # sessions using Docker
 cam entity "config.json"               # sessions with config.json
-cam entity "use Redis"                 # find decisions about Redis
 
-# Time filtering
-cam "authentication" "[2h]"            # last 2 hours
-cam "database" "[15min]"               # last 15 minutes
-cam "API design" "[3d]"                # last 3 days
-cam "setup" "[1w]"                     # last week
+# Browse recent without query
+cam -t 1h                              # last hour's segments
+cam recent -t 30min                    # last 30 minutes
+```
 
-# Agent filtering
-cam "@claude" "authentication"         # Claude sessions only
-cam "@openclaw" "error handling"       # OpenClaw sessions only
+## Filters
 
-# Combined filters
-cam "@claude" "error" "[2h]"           # Claude errors in last 2 hours
+```bash
+# Time filter (-t)
+cam "auth" -t 15min                    # last 15 minutes
+cam "auth" -t 2h                       # last 2 hours
+cam "auth" -t 3d                       # last 3 days
+cam "auth" -t 1w                       # last week
 
-# Explicit syntax (equivalent)
-cam search "auth" -t 2h -a claude
+# Agent filter (-a)
+cam "error" -a claude                  # Claude sessions only
+cam "error" -a cursor                  # Cursor sessions only
 
-# Options
-cam search "API design" -n 20          # more results
-cam query "database schema" --json     # JSON output
+# Combined
+cam "error handling" -t 2h -a claude -n 20
+
+# Output formats
+cam "database" --json                  # JSON output
+cam "database" --files                 # file paths only
 ```
 
 ## Other Commands
 
 ```bash
 cam status              # Show status (indexed sessions, segments)
-cam sync                # Sync with remote repo (if configured)
 cam index               # Index new local sessions
-cam logs                # View daemon logs
+cam sync                # Sync with remote repo (if configured)
 cam logs -f             # Follow daemon logs
+cam update              # Update CAM to latest version
 ```
 
 ## Search Options
 
 | Option | Description |
 |--------|-------------|
-| `-n N` | Return N results (default: 10) |
-| `-t TIME` | Time filter (2h, 15min, 3d, 1w) |
-| `-a AGENT` | Agent filter (claude, openclaw, etc.) |
-| `--json` | JSON output |
-| `--files` | File list output |
-
-### Inline Filter Syntax
-
-Time and agent filters can also be specified inline:
-- `[2h]` `[15min]` `[3d]` `[1w]` - Time filters
-- `@claude` `@openclaw` - Agent filters
+| `-t TIME` | Time filter: `15min`, `2h`, `3d`, `1w` |
+| `-a AGENT` | Agent filter: `claude`, `cursor`, `openclaw` |
+| `-n N` | Number of results (default: 10) |
+| `--json` | JSON output for scripting |
+| `--files` | File paths only |
 
 ## Reading Results
 
