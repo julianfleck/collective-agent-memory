@@ -69,11 +69,24 @@ def get_gliner_model():
     global _gliner_model
     if _gliner_model is None:
         try:
-            from gliner2 import GLiNER2
             import sys
+            from transformers import AutoConfig, AutoModel
+            from gliner2 import GLiNER2
+            from gliner2.model import ExtractorConfig, Extractor
+
+            # Register GLiNER2's model type with transformers to avoid
+            # "model of type extractor" warning (gliner2 doesn't do this itself)
+            try:
+                AutoConfig.register('extractor', ExtractorConfig)
+                AutoModel.register(ExtractorConfig, Extractor)
+            except ValueError:
+                pass  # Already registered
+
             print("Loading GLiNER2 model...", flush=True)
             sys.stdout.flush()
+
             _gliner_model = GLiNER2.from_pretrained("fastino/gliner2-base-v1")
+
             print("GLiNER2 model loaded.", flush=True)
         except ImportError:
             print("GLiNER2 not installed, entity extraction disabled", flush=True)

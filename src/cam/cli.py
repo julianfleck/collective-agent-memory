@@ -1448,6 +1448,118 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """Update CAM to the latest version from GitHub."""
+    import shutil
+    from datetime import datetime, timezone
+
+    REPO = "julianfleck/collective-agent-memory"
+    force = getattr(args, 'force', False)
+
+    console.print("[bold]Checking for updates...[/bold]")
+
+    # Get local commit hash
+    local_commit = None
+    local_commit_time = None
+    try:
+        # Get the source directory of this package
+        src_dir = Path(__file__).parent
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=src_dir
+        )
+        if result.returncode == 0:
+            local_commit = result.stdout.strip()
+            # Get commit timestamp
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%ct"],
+                capture_output=True, text=True, cwd=src_dir
+            )
+            if result.returncode == 0:
+                local_commit_time = datetime.fromtimestamp(int(result.stdout.strip()), tz=timezone.utc)
+    except Exception:
+        pass
+
+    # Get remote commit info via GitHub API
+    remote_commit = None
+    remote_commit_time = None
+    try:
+        import urllib.request
+        import json
+
+        url = f"https://api.github.com/repos/{REPO}/commits/main"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            remote_commit = data["sha"]
+            # Parse ISO timestamp
+            commit_date = data["commit"]["committer"]["date"]
+            remote_commit_time = datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+    except Exception as e:
+        console.print(f"[red]Failed to check remote version: {e}[/red]")
+        if not force:
+            return 1
+        console.print("[yellow]Forcing update anyway...[/yellow]")
+
+    # Compare versions
+    if local_commit and remote_commit:
+        local_short = local_commit[:7]
+        remote_short = remote_commit[:7]
+
+        if local_commit == remote_commit:
+            console.print(f"[green]Already up to date[/green] ({local_short})")
+            if not force:
+                return 0
+            console.print("[yellow]Forcing reinstall...[/yellow]")
+        else:
+            console.print(f"  Local:  {local_short}", end="")
+            if local_commit_time:
+                console.print(f" ({local_commit_time.strftime('%Y-%m-%d %H:%M')})")
+            else:
+                console.print()
+
+            console.print(f"  Remote: {remote_short}", end="")
+            if remote_commit_time:
+                console.print(f" ({remote_commit_time.strftime('%Y-%m-%d %H:%M')})")
+            else:
+                console.print()
+
+            # Check if remote is newer
+            if local_commit_time and remote_commit_time:
+                if remote_commit_time <= local_commit_time and not force:
+                    console.print("[green]Local version is up to date or newer[/green]")
+                    return 0
+    elif not force:
+        console.print("[yellow]Could not determine local version[/yellow]")
+
+    # Perform update
+    console.print()
+    console.print("[bold]Updating CAM...[/bold]")
+
+    install_url = f"git+https://github.com/{REPO}.git"
+
+    if shutil.which("uv"):
+        cmd = ["uv", "tool", "install", "--force", install_url]
+    elif shutil.which("pipx"):
+        cmd = ["pipx", "install", "--force", install_url]
+    else:
+        cmd = ["pip3", "install", "--user", "--force-reinstall", install_url]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]Update failed:[/red]")
+            console.print(result.stderr)
+            return 1
+
+        console.print("[green]Update complete![/green]")
+        console.print("[dim]Run 'cam daemon stop && cam daemon start' to restart the daemon[/dim]")
+        return 0
+    except Exception as e:
+        console.print(f"[red]Update failed: {e}[/red]")
+        return 1
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1483,6 +1595,7 @@ Setup:
   cam daemon <cmd>         Manage background daemon (start|stop|clean)
   cam skill install        Install /cam skill to agent
   cam logs                 View daemon logs
+  cam update               Update CAM to latest version
 
 Filters: -t TIME (15min, 2h, 3d, 1w), -a AGENT (claude, openclaw, cursor)
 Output:  -n NUM (result count), --json, --files
@@ -1565,6 +1678,9 @@ Output:  -n NUM (result count), --json, --files
     p_logs.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     p_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of lines")
 
+    p_update = subparsers.add_parser("update", help="Update CAM to latest version")
+    p_update.add_argument("-f", "--force", action="store_true", help="Force update even if up to date")
+
     # Internal command (not shown in grouped help above)
     p_segment = subparsers.add_parser("segment", help="Segment a session file")
     p_segment.add_argument("session_file")
@@ -1580,7 +1696,7 @@ Output:  -n NUM (result count), --json, --files
 
     # Handle bare search query with inline filters
     # e.g., cam "query" [2h] @claude or cam [15min]
-    known_cmds = {"search", "vsearch", "query", "segment", "index", "sync", "status", "daemon", "skill", "init", "logs", "entity", "recent", "get"}
+    known_cmds = {"search", "vsearch", "query", "segment", "index", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
     if argv and argv[0] not in known_cmds and not argv[0].startswith("-"):
         # Parse inline filters from bare query
         query, agent, time_delta = parse_query_filters(argv)
@@ -1632,6 +1748,8 @@ Output:  -n NUM (result count), --json, --files
         return cmd_init(args)
     elif args.command == "logs":
         return cmd_logs(args)
+    elif args.command == "update":
+        return cmd_update(args)
     elif args.command == "entity":
         return cmd_entity(args)
     elif args.command == "recent":
