@@ -1056,6 +1056,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                 console.print(f"         [dim]{source}: {count}[/dim]")
         else:
             console.print("[green]\\[ok][/green] Queue: empty")
+
+        # Check watchdog status
+        if daemon.is_watchdog_running():
+            console.print("[green]\\[ok][/green] Watchdog active")
+        else:
+            console.print("[dim]\\[--][/dim] Watchdog not installed [dim](cam daemon watchdog)[/dim]")
     else:
         console.print("[yellow]--[/yellow] Daemon not running")
 
@@ -1103,8 +1109,24 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         console.print(f"[dim]Queue: {priority + normal} sessions pending ({priority} priority, {normal} normal)[/dim]")
         return 0
 
+    elif args.daemon_cmd == "watchdog":
+        # Install/manage watchdog
+        if daemon.is_watchdog_running():
+            console.print("[green]Watchdog is running[/green]")
+            console.print("[dim]To uninstall: cam daemon watchdog-stop[/dim]")
+        else:
+            console.print("Installing watchdog...")
+            if daemon.install_watchdog():
+                console.print("[green]Watchdog installed (runs every 5 min)[/green]")
+                return 0
+            return 1
+        return 0
+
+    elif args.daemon_cmd == "watchdog-stop":
+        return 0 if daemon.uninstall_watchdog() else 1
+
     else:
-        print("Usage: cam daemon <start|stop|run|clean>")
+        print("Usage: cam daemon <start|stop|run|clean|watchdog|watchdog-stop>")
         return 1
 
 
@@ -1667,7 +1689,7 @@ Output:  -n NUM (result count), --json, --files
     p_init.add_argument("-y", "--yes", action="store_true", help="Non-interactive mode")
 
     p_daemon = subparsers.add_parser("daemon", help="Manage daemon")
-    p_daemon.add_argument("daemon_cmd", choices=["start", "stop", "run", "clean"])
+    p_daemon.add_argument("daemon_cmd", choices=["start", "stop", "run", "clean", "watchdog", "watchdog-stop"])
 
     p_skill = subparsers.add_parser("skill", help="Install skill")
     p_skill.add_argument("skill_cmd", choices=["install"], help="Skill command")

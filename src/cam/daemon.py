@@ -1000,6 +1000,258 @@ def uninstall_service() -> bool:
         return False
 
 
+# =============================================================================
+# Watchdog - Monitors daemon health and restarts if frozen
+# =============================================================================
+
+WATCHDOG_SCRIPT_PATH = Path.home() / ".cam" / "scripts" / "cam-watchdog.sh"
+WATCHDOG_STATE_FILE = Path.home() / ".cam" / ".watchdog-state"
+WATCHDOG_LOG_FILE = Path.home() / ".cam" / "watchdog.log"
+
+
+def write_watchdog_script() -> Path:
+    """Generate the watchdog bash script."""
+    cam_bin = shutil.which("cam") or str(Path.home() / ".local" / "bin" / "cam")
+
+    script_content = f"""#!/bin/bash
+#
+# CAM Daemon Watchdog
+# Detects frozen daemon (alive but not processing queue) and restarts it
+#
+
+QUEUE_FILE="$HOME/.cam/.index-queue"
+PRIORITY_QUEUE_FILE="$HOME/.cam/.index-queue-priority"
+STATE_FILE="$HOME/.cam/.watchdog-state"
+LOG_FILE="$HOME/.cam/watchdog.log"
+
+log() {{ echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"; }}
+
+# Check if daemon process is running
+if ! pgrep -f "cam daemon" > /dev/null 2>&1; then
+    log "WARN: Daemon not running, starting..."
+    "{cam_bin}" daemon start
+    exit 0
+fi
+
+# Get current queue length (both queues)
+CURRENT=0
+[ -f "$QUEUE_FILE" ] && CURRENT=$((CURRENT + $(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)))
+[ -f "$PRIORITY_QUEUE_FILE" ] && CURRENT=$((CURRENT + $(wc -l < "$PRIORITY_QUEUE_FILE" 2>/dev/null || echo 0)))
+
+# Get previous queue length
+PREVIOUS=$(cat "$STATE_FILE" 2>/dev/null || echo -1)
+
+# Save current for next run
+echo "$CURRENT" > "$STATE_FILE"
+
+# If queue not empty AND unchanged for 2 consecutive checks → frozen
+if [ "$CURRENT" -gt 0 ] && [ "$CURRENT" = "$PREVIOUS" ]; then
+    log "ERROR: Queue stuck at $CURRENT items, restarting daemon"
+    "{cam_bin}" daemon stop
+    sleep 2
+    "{cam_bin}" daemon start
+else
+    log "OK: queue=$CURRENT (was $PREVIOUS)"
+fi
+"""
+    WATCHDOG_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WATCHDOG_SCRIPT_PATH.write_text(script_content)
+    WATCHDOG_SCRIPT_PATH.chmod(0o755)
+    return WATCHDOG_SCRIPT_PATH
+
+
+def write_watchdog_launchd_plist() -> Path:
+    """Generate macOS launchd plist for watchdog (runs every 5 min)."""
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.julianfleck.cam.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{WATCHDOG_SCRIPT_PATH}</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{WATCHDOG_LOG_FILE}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{WATCHDOG_LOG_FILE}</string>
+</dict>
+</plist>
+"""
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "net.julianfleck.cam.watchdog.plist"
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_content)
+    return plist_path
+
+
+def write_watchdog_systemd_files() -> tuple:
+    """Generate Linux systemd timer and service for watchdog."""
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    service_dir.mkdir(parents=True, exist_ok=True)
+
+    # Timer (runs every 5 min)
+    timer_content = """[Unit]
+Description=CAM Daemon Watchdog Timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+"""
+    timer_path = service_dir / "cam-watchdog.timer"
+    timer_path.write_text(timer_content)
+
+    # Service (oneshot)
+    service_content = f"""[Unit]
+Description=CAM Daemon Watchdog
+
+[Service]
+Type=oneshot
+ExecStart={WATCHDOG_SCRIPT_PATH}
+"""
+    service_path = service_dir / "cam-watchdog.service"
+    service_path.write_text(service_content)
+
+    return timer_path, service_path
+
+
+def install_watchdog() -> bool:
+    """Install the watchdog for this platform."""
+    import platform
+
+    system = platform.system()
+
+    # Write the watchdog script
+    script_path = write_watchdog_script()
+    log.info(f"Created watchdog script: {script_path}")
+
+    if system == "Darwin":
+        plist_path = write_watchdog_launchd_plist()
+        log.info(f"Created launchd plist: {plist_path}")
+
+        # Unload if already loaded
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+
+        # Load and start
+        result = subprocess.run(
+            ["launchctl", "load", str(plist_path)],
+            capture_output=True, text=True
+        )
+
+        if result.returncode == 0:
+            log.info("CAM watchdog installed (runs every 5 min)")
+            log.info(f"  Log: {WATCHDOG_LOG_FILE}")
+            return True
+        else:
+            log.error(f"Failed to load watchdog: {result.stderr}")
+            return False
+
+    elif system == "Linux":
+        timer_path, service_path = write_watchdog_systemd_files()
+        log.info(f"Created systemd files: {timer_path}, {service_path}")
+
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+
+        result = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", "cam-watchdog.timer"],
+            capture_output=True, text=True
+        )
+
+        if result.returncode == 0:
+            log.info("CAM watchdog installed (runs every 5 min)")
+            log.info(f"  Status: systemctl --user status cam-watchdog.timer")
+            log.info(f"  Log: {WATCHDOG_LOG_FILE}")
+            return True
+        else:
+            log.error(f"Failed to enable watchdog timer: {result.stderr}")
+            return False
+
+    else:
+        log.error(f"Unsupported platform: {system}")
+        return False
+
+
+def uninstall_watchdog() -> bool:
+    """Uninstall the watchdog."""
+    import platform
+
+    system = platform.system()
+
+    if system == "Darwin":
+        plist_path = Path.home() / "Library" / "LaunchAgents" / "net.julianfleck.cam.watchdog.plist"
+        if plist_path.exists():
+            subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+            plist_path.unlink()
+            log.info("CAM watchdog uninstalled from launchd")
+        else:
+            log.info("CAM watchdog not installed")
+
+    elif system == "Linux":
+        timer_path = Path.home() / ".config" / "systemd" / "user" / "cam-watchdog.timer"
+        service_path = Path.home() / ".config" / "systemd" / "user" / "cam-watchdog.service"
+
+        if timer_path.exists() or service_path.exists():
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", "cam-watchdog.timer"],
+                capture_output=True
+            )
+            if timer_path.exists():
+                timer_path.unlink()
+            if service_path.exists():
+                service_path.unlink()
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            log.info("CAM watchdog uninstalled from systemd")
+        else:
+            log.info("CAM watchdog not installed")
+
+    else:
+        log.error(f"Unsupported platform: {system}")
+        return False
+
+    # Clean up script and state
+    if WATCHDOG_SCRIPT_PATH.exists():
+        WATCHDOG_SCRIPT_PATH.unlink()
+    if WATCHDOG_STATE_FILE.exists():
+        WATCHDOG_STATE_FILE.unlink()
+
+    return True
+
+
+def is_watchdog_running() -> bool:
+    """Check if the watchdog is installed and running."""
+    import platform
+
+    system = platform.system()
+
+    if system == "Darwin":
+        result = subprocess.run(
+            ["launchctl", "list", "net.julianfleck.cam.watchdog"],
+            capture_output=True
+        )
+        return result.returncode == 0
+
+    elif system == "Linux":
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "cam-watchdog.timer"],
+            capture_output=True
+        )
+        return result.returncode == 0
+
+    return False
+
+
 if __name__ == "__main__":
     import argparse
 
