@@ -79,10 +79,13 @@ cam update              # Update CAM to latest version
 After searching, read the full segment:
 
 ```bash
-# Via qmd
-qmd get "sessions/claude@laptop/2026-03-15/03-api-design.md" --full
+# Get segment content
+cam get claude@laptop/2026-03-15/03-api-design.md
 
-# Or directly
+# Get only metadata as JSON
+cam get claude@laptop/2026-03-15/03-api-design.md --meta
+
+# Or read directly
 cat ~/.cam/sessions/claude@laptop/2026-03-15/03-api-design.md
 ```
 
