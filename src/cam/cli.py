@@ -36,6 +36,30 @@ from rich.table import Table
 
 console = Console()
 
+# Version
+__version__ = "0.2.0"
+
+
+def get_version_string() -> str:
+    """Get version string with commit hash."""
+    version = __version__
+
+    # Try to get git commit hash
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True,
+            cwd=Path(__file__).parent
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+            version = f"{version} ({commit})"
+    except Exception:
+        pass
+
+    return version
+
+
 # Environment variable prefix
 ENV_PREFIX = "CAM_"
 
@@ -775,7 +799,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     sync_repo = get_sync_repo()
     machine_id = get_hostname()
 
-    console.print(Panel.fit("Collective Agent Memory", style="bold"))
+    console.print(Panel.fit(f"Collective Agent Memory {get_version_string()}", style="bold"))
     console.print()
 
     # Config table
@@ -1248,8 +1272,10 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
-    help_text = """\
-Collective Agent Memory - search and sync AI agent sessions
+    version_str = get_version_string()
+
+    help_text = f"""\
+Collective Agent Memory {version_str}
 
 Search:
   cam "query"              Keyword search (fast, default)
@@ -1285,6 +1311,7 @@ Output:  -n NUM (result count), --json, --files
         description=help_text,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("-v", "--version", action="version", version=f"cam {version_str}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
