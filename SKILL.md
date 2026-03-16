@@ -28,9 +28,10 @@ cam query "error handling patterns" -t 2h
 cam entity "docker"                    # sessions using Docker
 cam entity "config.json"               # sessions with config.json
 
-# Browse recent without query
+# Browse recent (no search query)
 cam -t 1h                              # last hour's segments
-cam recent -t 30min                    # last 30 minutes
+cam -t 30min                           # last 30 minutes
+cam recent                             # last 24 hours
 ```
 
 ## Filters

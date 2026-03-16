@@ -1777,9 +1777,15 @@ Output:  -n NUM (result count), --json, --files
         argv = sys.argv[1:]
 
     # Handle bare search query with inline filters
-    # e.g., cam "query" [2h] @claude or cam [15min]
+    # e.g., cam "query" [2h] @claude or cam [15min] or cam -t 30min
     known_cmds = {"search", "vsearch", "query", "segment", "index", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
-    if argv and argv[0] not in known_cmds and not argv[0].startswith("-"):
+
+    # Handle cam -t TIME (shorthand for cam recent -t TIME)
+    if argv and argv[0] in ("-t", "--time") and len(argv) >= 2:
+        new_argv = ["recent", "-t", argv[1]] + argv[2:]
+        argv = new_argv
+
+    elif argv and argv[0] not in known_cmds and not argv[0].startswith("-"):
         # Parse inline filters from bare query
         query, agent, time_delta = parse_query_filters(argv)
 
