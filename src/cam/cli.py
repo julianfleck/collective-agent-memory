@@ -826,7 +826,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     console.print("[bold]Session sources[/bold]")
     for d in get_sessions_dirs():
         count = len(list(d.glob("**/*.jsonl")))
-        console.print(f"  {d.name}: {count} files")
+        # Detect agent from path
+        path_str = str(d)
+        if "/.claude/" in path_str:
+            agent = "Claude Code"
+        elif "/.cursor/" in path_str:
+            agent = "Cursor"
+        elif "/.openclaw/" in path_str:
+            agent = "OpenClaw"
+        elif "/.codex/" in path_str:
+            agent = "Codex"
+        else:
+            agent = d.name
+        console.print(f"  {agent}: {count} files")
 
     if not get_sessions_dirs():
         console.print("  [dim](none found)[/dim]")

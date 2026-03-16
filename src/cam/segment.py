@@ -190,8 +190,13 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
                 if not isinstance(message, dict):
                     continue
 
-                # Determine role: check message.role first, fall back to top-level type
+                # Determine role: check multiple locations
+                # - message.role (OpenClaw format)
+                # - top-level role (Cursor format)
+                # - top-level type (Claude Code format)
                 role = message.get("role", "")
+                if not role:
+                    role = data.get("role", "")
                 if not role and msg_type in ("user", "assistant"):
                     role = msg_type
 
@@ -221,6 +226,14 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
 
             except json.JSONDecodeError:
                 continue
+
+    # Fallback: use file modification time if no timestamp found
+    if not session_meta.get("started"):
+        try:
+            mtime = session_path.stat().st_mtime
+            session_meta["started"] = datetime.fromtimestamp(mtime).isoformat()
+        except (OSError, ValueError):
+            pass
 
     return session_meta, messages
 
