@@ -766,6 +766,8 @@ def write_launchd_plist(
         <string>{machine_id}</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:{Path.home()}/.local/bin</string>
+        <key>HF_HUB_OFFLINE</key>
+        <string>1</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -811,6 +813,7 @@ Environment="CAM_SYNC_REPO={sync_repo}"
 Environment="CAM_WORKSPACE_DIR={workspace_dir}"
 Environment="CAM_MACHINE_ID={machine_id}"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin:{Path.home()}/.local/bin"
+Environment="HF_HUB_OFFLINE=1"
 Restart=on-failure
 RestartSec=30
 
