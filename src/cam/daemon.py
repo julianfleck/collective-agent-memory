@@ -466,15 +466,94 @@ class IndexWorker:
             mark_session_indexed(session_path)
             return False
 
-    def update_qmd(self):
-        """Update qmd search index."""
-        if shutil.which("qmd"):
-            subprocess.run(["qmd", "collection", "remove", "sessions"], capture_output=True)
-            subprocess.run(
-                ["qmd", "collection", "add", str(self.output_dir), "--name", "sessions"],
-                capture_output=True
+    def _find_qmd(self) -> str | None:
+        """Find qmd executable.
+
+        Launchd/systemd have limited PATH, so we first try the user's login
+        shell to find qmd, then fall back to known installation paths.
+        """
+        # First: check current PATH (works if daemon inherits full environment)
+        qmd_path = shutil.which("qmd")
+        if qmd_path:
+            return qmd_path
+
+        # Second: ask user's login shell (gets their full PATH from profile)
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", "which qmd"],
+                capture_output=True, text=True, timeout=5
             )
-            log.debug("Updated qmd collection")
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+        # Third: check known installation paths
+        home = Path.home()
+        search_paths = [
+            "/opt/homebrew/bin/qmd",      # macOS Homebrew (Apple Silicon)
+            "/usr/local/bin/qmd",          # macOS Homebrew (Intel) / Linux local
+            "/usr/bin/qmd",                # Linux system
+            home / ".local/bin/qmd",       # pip/pipx user install
+            home / ".npm-global/bin/qmd",  # npm with custom prefix
+        ]
+
+        # Check nvm installations
+        nvm_dir = home / ".nvm/versions/node"
+        if nvm_dir.exists():
+            for node_version in sorted(nvm_dir.iterdir(), reverse=True):
+                nvm_qmd = node_version / "bin/qmd"
+                if nvm_qmd.exists():
+                    return str(nvm_qmd)
+
+        for path in search_paths:
+            p = Path(path) if isinstance(path, str) else path
+            if p.exists():
+                return str(p)
+
+        return None
+
+    def update_qmd(self):
+        """Update qmd search index (incremental)."""
+        qmd_path = self._find_qmd()
+        if qmd_path:
+            # Use qmd update for incremental indexing (faster than remove/add)
+            result = subprocess.run(
+                [qmd_path, "update"],
+                capture_output=True, text=True, env=_clean_env()
+            )
+            if result.returncode == 0:
+                log.debug("Updated qmd index")
+            else:
+                # Fallback: ensure collection exists
+                subprocess.run(
+                    [qmd_path, "collection", "add", str(self.output_dir), "--name", "sessions"],
+                    capture_output=True, env=_clean_env()
+                )
+
+    def embed_qmd(self):
+        """Run qmd embed in background to generate vector embeddings."""
+        qmd_path = self._find_qmd()
+        if not qmd_path:
+            log.debug("qmd not found, skipping embed")
+            return
+
+        # Check if embed is already running
+        if hasattr(self, '_embed_process') and self._embed_process is not None:
+            if self._embed_process.poll() is None:
+                log.debug("qmd embed still running, skipping")
+                return
+            # Previous process finished
+            self._embed_process = None
+
+        # Start embed in background
+        log.info("Starting qmd embed in background")
+        self._embed_process = subprocess.Popen(
+            [qmd_path, "embed"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_clean_env()
+        )
 
     def run_loop(self):
         """Main worker loop - processes queue items."""
@@ -492,7 +571,9 @@ class IndexWorker:
         consecutive_failures = 0
         max_consecutive_failures = 10  # Restart daemon after this many failures
         last_qmd_update = datetime.now()
+        last_qmd_embed = datetime.now()
         last_sync = datetime.now()
+        EMBED_INTERVAL = 300  # 5 minutes between embed runs
 
         while self.running:
             try:
@@ -537,6 +618,12 @@ class IndexWorker:
                         if do_sync(self.output_dir, self.sync_repo, self.machine_id):
                             sessions_indexed_since_sync = 0
                         last_sync = datetime.now()
+
+                    # Run qmd embed periodically when idle (runs in background, skips if already running)
+                    time_since_embed = (datetime.now() - last_qmd_embed).total_seconds()
+                    if time_since_embed >= EMBED_INTERVAL:
+                        self.embed_qmd()
+                        last_qmd_embed = datetime.now()
 
                     # Wait before checking again
                     time.sleep(QUEUE_POLL_INTERVAL)
