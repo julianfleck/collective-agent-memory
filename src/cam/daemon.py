@@ -42,6 +42,20 @@ QUEUE_POLL_INTERVAL = 2  # Check queue every 2 seconds
 SESSION_TIMEOUT = 300  # 5 minutes max per session before giving up
 SYNC_INTERVAL = 300  # 5 minutes between syncs when idle
 
+
+def _clean_env() -> dict:
+    """Get environment dict with malloc debugging vars removed.
+
+    macOS prints 'MallocStackLogging: can't turn off...' warnings when
+    subprocess inherits malloc debugging environment variables from parent.
+    """
+    env = os.environ.copy()
+    # Remove macOS malloc debugging variables that cause noisy warnings
+    for key in list(env.keys()):
+        if key.startswith('Malloc') or key.startswith('MallocStack'):
+            del env[key]
+    return env
+
 # Queue files
 QUEUE_DIR = Path.home() / ".cam"
 PRIORITY_QUEUE_FILE = QUEUE_DIR / ".index-queue-priority"
@@ -569,40 +583,43 @@ def do_sync(workspace_dir: Path, sync_repo: str, machine_id: str) -> bool:
         os.chdir(workspace_dir)
 
         try:
+            # Use clean environment to avoid macOS malloc warnings
+            env = _clean_env()
+
             # Initialize git if needed
             if not (workspace_dir / ".git").exists():
                 log.info("Initializing git repo...")
-                subprocess.run(["git", "init"], capture_output=True)
+                subprocess.run(["git", "init"], capture_output=True, env=env)
                 subprocess.run(
                     ["git", "remote", "add", "origin", f"https://github.com/{sync_repo}.git"],
-                    capture_output=True
+                    capture_output=True, env=env
                 )
 
             # Pull latest
             log.info(f"Syncing with {sync_repo}...")
-            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True)
+            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, env=env)
             subprocess.run(
                 ["git", "merge", "origin/main", "--no-edit"],
-                capture_output=True
+                capture_output=True, env=env
             )
 
             # Check for changes to push
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
-                capture_output=True, text=True
+                capture_output=True, text=True, env=env
             )
 
             if result.stdout.strip():
                 # Has changes, commit and push
-                subprocess.run(["git", "add", "-A"], capture_output=True)
+                subprocess.run(["git", "add", "-A"], capture_output=True, env=env)
                 subprocess.run(
                     ["git", "commit", "-m", f"Add segments from {machine_id}"],
-                    capture_output=True
+                    capture_output=True, env=env
                 )
-                subprocess.run(["git", "branch", "-M", "main"], capture_output=True)
+                subprocess.run(["git", "branch", "-M", "main"], capture_output=True, env=env)
                 push_result = subprocess.run(
                     ["git", "push", "-u", "origin", "main"],
-                    capture_output=True, text=True
+                    capture_output=True, text=True, env=env
                 )
                 if push_result.returncode == 0:
                     log.info("Sync complete: pushed new segments")

@@ -36,6 +36,20 @@ from rich.table import Table
 
 console = Console()
 
+
+def _clean_env() -> dict:
+    """Get environment dict with malloc debugging vars removed.
+
+    macOS prints 'MallocStackLogging: can't turn off...' warnings when
+    subprocess inherits malloc debugging environment variables from parent.
+    """
+    env = os.environ.copy()
+    for key in list(env.keys()):
+        if key.startswith('Malloc') or key.startswith('MallocStack'):
+            del env[key]
+    return env
+
+
 # Version
 __version__ = "0.2.0"
 
@@ -994,16 +1008,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
     # Initialize git if needed
     if not (workspace_dir / ".git").exists():
         print(f"Initializing git repo...")
-        subprocess.run(["git", "init"], capture_output=True)
+        subprocess.run(["git", "init"], capture_output=True, env=_clean_env())
         subprocess.run(["git", "remote", "add", "origin", f"https://github.com/{sync_repo}.git"],
-                      capture_output=True)
+                      capture_output=True, env=_clean_env())
 
     # Pull latest
     if not args.push_only:
         console.print(f"Pulling from {sync_repo}...")
-        subprocess.run(["git", "fetch", "origin", "main"], capture_output=True)
+        subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, env=_clean_env())
         result = subprocess.run(["git", "merge", "origin/main", "--no-edit"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=_clean_env())
         if result.returncode != 0 and "not something we can merge" not in result.stderr:
             # Might be first push, that's ok
             pass
@@ -1018,15 +1032,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
         cmd_index(index_args)
 
         # Commit and push
-        result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+        result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, env=_clean_env())
         if result.stdout.strip():
             console.print(f"Pushing to {sync_repo}...")
-            subprocess.run(["git", "add", "-A"])
+            subprocess.run(["git", "add", "-A"], env=_clean_env())
             segment_count = len(result.stdout.strip().split('\n'))
-            subprocess.run(["git", "commit", "-m", f"Add segments from {machine_id}"])
-            subprocess.run(["git", "branch", "-M", "main"], capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"Add segments from {machine_id}"], env=_clean_env())
+            subprocess.run(["git", "branch", "-M", "main"], capture_output=True, env=_clean_env())
             push_result = subprocess.run(["git", "push", "-u", "origin", "main"],
-                                        capture_output=True, text=True)
+                                        capture_output=True, text=True, env=_clean_env())
             if push_result.returncode != 0:
                 print(f"  Push failed: {push_result.stderr}", file=sys.stderr)
         else:
