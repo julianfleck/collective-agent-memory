@@ -1127,6 +1127,34 @@ def cmd_status(args: argparse.Namespace) -> int:
     console.print()
     if shutil.which("qmd"):
         console.print("[green]\\[ok][/green] qmd installed")
+        # Check embedding status
+        try:
+            result = subprocess.run(
+                ["qmd", "status"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                # Parse vectors and pending from qmd status output
+                vectors = 0
+                pending = 0
+                for line in result.stdout.split('\n'):
+                    if 'Vectors:' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'Vectors:' and i + 1 < len(parts):
+                                vectors = int(parts[i + 1])
+                    elif 'Pending:' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'Pending:' and i + 1 < len(parts):
+                                pending = int(parts[i + 1])
+
+                if pending > 0:
+                    console.print(f"[yellow]\\[..][/yellow] Embeddings: {vectors} vectors, {pending} pending [dim](run 'qmd embed')[/dim]")
+                elif vectors > 0:
+                    console.print(f"[green]\\[ok][/green] Embeddings: {vectors} vectors")
+        except Exception:
+            pass  # Don't fail status if qmd check fails
     else:
         console.print("[yellow]--[/yellow] qmd not installed (npm install -g @tobilu/qmd)")
 
