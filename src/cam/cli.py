@@ -403,6 +403,7 @@ def format_results_for_json(results: list, workspace_dir: Path = None) -> list:
     Transforms qmd's raw output into a more usable format:
     - path: clean relative path (agent@machine/date/file.md)
     - date: extracted date (YYYY-MM-DD)
+    - timestamp: last_timestamp from frontmatter (ISO format)
     - agent: agent name
     - machine: machine name
     - title: section title
@@ -437,9 +438,29 @@ def format_results_for_json(results: list, workspace_dir: Path = None) -> list:
                 agent, machine = agent_machine.split('@', 1)
             date = parts[1] if len(parts) > 1 else ""
 
+        # Read timestamp from frontmatter
+        timestamp = ""
+        local_path = qmd_path_to_local(qmd_path, workspace_dir)
+        try:
+            if local_path.exists():
+                with open(local_path) as f:
+                    content = f.read(3000)  # Read enough for frontmatter
+                    if content.startswith('---'):
+                        end = content.find('---', 3)
+                        if end > 0:
+                            frontmatter = yaml.safe_load(content[3:end])
+                            # Prefer last_timestamp, fall back to first_timestamp
+                            ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
+                            if ts:
+                                # Ensure it's a string (might be datetime from yaml)
+                                timestamp = str(ts) if not isinstance(ts, str) else ts
+        except Exception:
+            pass
+
         formatted.append({
             "path": path,
             "date": date,
+            "timestamp": timestamp,
             "agent": agent,
             "machine": machine,
             "title": result.get('title', ''),

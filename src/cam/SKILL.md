@@ -87,6 +87,7 @@ Returns:
   {
     "path": "claude@wintermute/2026-03-16/03-api-design.md",
     "date": "2026-03-16",
+    "timestamp": "2026-03-16T14:30:00+00:00",
     "agent": "claude",
     "machine": "wintermute",
     "title": "Section 3: Api Design",
