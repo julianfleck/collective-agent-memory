@@ -542,7 +542,7 @@ class SearchIndex:
                 s.first_timestamp,
                 s.last_timestamp,
                 s.entities,
-                snippet(segments_fts, 2, '', '', '...', {snippet_tokens}) as snippet
+                snippet(segments_fts, 3, '', '', '...', {snippet_tokens}) as snippet
             FROM segments_fts
             JOIN segments s ON segments_fts.rowid = s.id
             WHERE segments_fts MATCH 'entities:' || ?
@@ -571,7 +571,7 @@ class SearchIndex:
                         machine=row['machine'],
                         first_timestamp=row['first_timestamp'],
                         last_timestamp=row['last_timestamp'],
-                        snippet=row['entities'],  # Show matched entities
+                        snippet=row['snippet'],  # Body snippet, not entities
                     ))
             except sqlite3.OperationalError:
                 pass

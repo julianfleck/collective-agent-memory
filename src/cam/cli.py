@@ -439,88 +439,6 @@ def cmd_recent_with_filter(
     return 0
 
 
-def cmd_vsearch(args: argparse.Namespace) -> int:
-    """Semantic search (vector similarity)."""
-    query = args.query
-    time_filter = None
-    agent_filter = getattr(args, 'agent', None)
-
-    # Check if query is actually a time filter like [15min]
-    if query and query.startswith('[') and query.endswith(']'):
-        try:
-            time_filter = parse_time_filter(query[1:-1])
-            query = None
-        except ValueError:
-            pass
-
-    if hasattr(args, 'time') and args.time:
-        try:
-            time_filter = parse_time_filter(args.time)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    if not query and time_filter:
-        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
-
-    if not query:
-        print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
-        return 1
-
-    # Note: vsearch now uses the same FTS5 search as keyword search
-    # The rich frontmatter provides good keyword coverage
-    return _run_search(
-        query,
-        limit=args.limit or 10,
-        json_output=args.json,
-        files_output=args.files,
-        agent_filter=agent_filter,
-        time_filter=time_filter,
-        snippet_tokens=args.snippet,
-    )
-
-
-def cmd_query(args: argparse.Namespace) -> int:
-    """Hybrid search with reranking (best quality)."""
-    query = args.query
-    time_filter = None
-    agent_filter = getattr(args, 'agent', None)
-
-    # Check if query is actually a time filter like [15min]
-    if query and query.startswith('[') and query.endswith(']'):
-        try:
-            time_filter = parse_time_filter(query[1:-1])
-            query = None
-        except ValueError:
-            pass
-
-    if hasattr(args, 'time') and args.time:
-        try:
-            time_filter = parse_time_filter(args.time)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    if not query and time_filter:
-        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
-
-    if not query:
-        print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
-        return 1
-
-    # Note: query/hybrid now uses the same FTS5 search
-    # The rich frontmatter provides good keyword coverage
-    return _run_search(
-        query,
-        limit=args.limit or 10,
-        json_output=args.json,
-        files_output=args.files,
-        agent_filter=agent_filter,
-        time_filter=time_filter,
-        snippet_tokens=args.snippet,
-    )
-
-
 def cmd_segment(args: argparse.Namespace) -> int:
     """Segment a session JSONL file into topic sections."""
     from . import segment
@@ -1171,7 +1089,7 @@ def cmd_entity(args: argparse.Namespace) -> int:
                 "agent": r.agent,
                 "machine": r.machine,
                 "title": r.title,
-                "entities": r.snippet or "",
+                "snippet": r.snippet or "",
             })
         print(json.dumps(formatted, indent=2))
     elif args.files:
@@ -1191,8 +1109,10 @@ def cmd_entity(args: argparse.Namespace) -> int:
             console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
             console.print(f"  [dim]{r.path}[/dim]")
             if r.snippet:
-                # Show matching entities
-                console.print(f"  [green]Entities:[/green] {r.snippet[:150]}")
+                # Clean up snippet
+                snippet = ' '.join(r.snippet.split())[:200]
+                if snippet:
+                    console.print(f"  [italic]{snippet}[/italic]")
             console.print()
 
     return 0
@@ -1368,9 +1288,7 @@ Search:
   cam "query"              Hybrid search with reranking (default)
   cam "query" [2h]         Search with time filter
   cam @claude "query"      Search specific agent
-  cam search "query"       Keyword search (fast)
-  cam vsearch "query"      Semantic search (vector similarity)
-  cam query "query"        Explicit hybrid + reranking
+  cam search "query"       Keyword search (explicit)
   cam entity "name"        Search by entity (tools, files, concepts)
 
 Browse:
@@ -1417,12 +1335,6 @@ Output:  -n NUM (result count), --json, --files
 
     p_search = subparsers.add_parser("search", help="Keyword search")
     add_search_args(p_search)
-
-    p_vsearch = subparsers.add_parser("vsearch", help="Semantic search")
-    add_search_args(p_vsearch)
-
-    p_query = subparsers.add_parser("query", help="Hybrid search + reranking")
-    add_search_args(p_query)
 
     p_entity = subparsers.add_parser("entity", help="Search by entity")
     p_entity.add_argument("entity", help="Entity name to search for")
@@ -1493,7 +1405,7 @@ Output:  -n NUM (result count), --json, --files
 
     # Handle bare search query with inline filters
     # e.g., cam "query" [2h] @claude or cam [15min] or cam -t 30min
-    known_cmds = {"search", "vsearch", "query", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
+    known_cmds = {"search", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
 
     # Handle cam -t TIME (shorthand for cam recent -t TIME)
     if argv and argv[0] in ("-t", "--time") and len(argv) >= 2:
@@ -1513,8 +1425,8 @@ Output:  -n NUM (result count), --json, --files
                 new_argv.extend(["--agent", agent])
             argv = new_argv
         else:
-            # Rebuild argv with parsed filters as proper arguments for query (hybrid search)
-            new_argv = ["query"]
+            # Rebuild argv with parsed filters as proper arguments for search
+            new_argv = ["search"]
             if query:
                 new_argv.append(query)
             else:
@@ -1531,10 +1443,6 @@ Output:  -n NUM (result count), --json, --files
     # Dispatch
     if args.command == "search":
         return cmd_search(args)
-    elif args.command == "vsearch":
-        return cmd_vsearch(args)
-    elif args.command == "query":
-        return cmd_query(args)
     elif args.command == "segment":
         return cmd_segment(args)
     elif args.command == "index":
