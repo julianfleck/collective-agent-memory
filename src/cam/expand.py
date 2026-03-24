@@ -1,120 +1,129 @@
-"""Query expansion using local GGUF model.
+"""Query expansion using Ollama API.
 
-Uses HyDE (Hypothetical Document Embeddings) approach:
-1. Generate hypothetical answer to the query
-2. Extract key terms from the hypothetical answer
-3. Combine with original query for better recall
+Uses a local LLM via Ollama for keyword expansion.
+Falls back to no expansion if Ollama isn't available.
 """
 
-import os
-from pathlib import Path
+import json
+import urllib.request
+import urllib.error
 from typing import List, Optional
 
-# Lazy load the model
-_llm = None
-_model_path = None
+OLLAMA_API = "http://localhost:11434/api"
+
+# Preferred generative models (smallest first)
+PREFERRED_MODELS = [
+    "qwen2:0.5b",
+    "qwen2:1.5b",
+    "gemma2:2b",
+    "gemma:2b",
+    "phi3:mini",
+    "llama3.2:1b",
+    "llama3.2:3b",
+    "llama3.1:8b",
+    "llama3.1:latest",
+]
+
+_available_model: Optional[str] = None
+_checked: bool = False
 
 
-def get_model_path() -> Optional[Path]:
-    """Find the query expansion model."""
-    # Check common locations
-    locations = [
-        Path.home() / ".cache" / "qmd" / "models" / "hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf",
-        Path.home() / ".cache" / "cam" / "models" / "qmd-query-expansion-1.7B-q4_k_m.gguf",
-        Path.home() / ".local" / "share" / "cam" / "models" / "qmd-query-expansion-1.7B-q4_k_m.gguf",
-    ]
+def _find_model() -> Optional[str]:
+    """Find the best available generative model."""
+    global _available_model, _checked
 
-    # Also check CAM_MODEL_PATH env var
-    env_path = os.environ.get("CAM_MODEL_PATH")
-    if env_path:
-        locations.insert(0, Path(env_path))
+    if _checked:
+        return _available_model
 
-    for path in locations:
-        if path.exists():
-            return path
+    _checked = True
+
+    try:
+        req = urllib.request.Request(f"{OLLAMA_API}/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            models = {m["name"].lower() for m in data.get("models", [])}
+
+            # Find first preferred model that's available
+            for model in PREFERRED_MODELS:
+                model_lower = model.lower()
+                if model_lower in models:
+                    _available_model = model
+                    return _available_model
+                # Also check without tag
+                base = model_lower.split(":")[0]
+                for m in models:
+                    if m.startswith(base):
+                        _available_model = m
+                        return _available_model
+
+    except Exception:
+        pass
 
     return None
 
 
-def get_llm():
-    """Load the query expansion model lazily."""
-    global _llm, _model_path
-
-    if _llm is not None:
-        return _llm
-
-    model_path = get_model_path()
-    if not model_path:
-        return None
-
-    try:
-        from llama_cpp import Llama
-
-        # Load with conservative settings for query expansion
-        _llm = Llama(
-            model_path=str(model_path),
-            n_ctx=512,  # Small context for short queries
-            n_threads=4,
-            verbose=False,
-        )
-        _model_path = model_path
-        return _llm
-    except Exception as e:
-        print(f"Warning: Could not load query expansion model: {e}")
-        return None
-
-
-def expand_query(query: str, max_tokens: int = 100) -> List[str]:
-    """Expand a query using HyDE approach.
+def expand_query(query: str) -> List[str]:
+    """Expand query using local LLM via Ollama.
 
     Args:
-        query: The original search query
-        max_tokens: Maximum tokens to generate
+        query: The search query to expand
 
     Returns:
-        List of expanded query terms (including original)
+        List of expanded terms (original + synonyms)
     """
-    llm = get_llm()
-    if llm is None:
-        # No model available, return just the original query
+    model = _find_model()
+    if not model:
         return [query]
 
-    # Simple query expansion prompt
-    prompt = f"""Expand this search query with related terms and synonyms.
-
-Query: {query}
-Expanded:"""
+    prompt = f"For the term '{query}', list any common abbreviations, alternative spellings, or closely related technical terms. Just 1-2, comma separated. If none exist, say 'none'."
 
     try:
-        response = llm(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=0.3,  # Lower temperature for more focused output
-            stop=["\n\n", "Query:", "Example:"],
-            echo=False,
+        payload = json.dumps({
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{OLLAMA_API}/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
 
-        raw_text = response["choices"][0]["text"].strip()
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+            response = data.get("response", "").strip()
 
-        # Extract just the first line of expansion (most relevant)
-        first_line = raw_text.split('\n')[0].strip()
+            if not response:
+                return [query]
 
-        # Clean up common artifacts
-        for prefix in ["Expanded:", "Synonyms:", "Related:"]:
-            if first_line.startswith(prefix):
-                first_line = first_line[len(prefix):].strip()
+            # Parse comma-separated keywords
+            keywords = []
+            for part in response.replace("\n", ",").split(","):
+                term = part.strip().lower()
+                # Remove parenthetical explanations
+                if "(" in term:
+                    term = term.split("(")[0].strip()
+                # Clean up
+                term = term.strip(".-*•123456789() \"'")
+                # Skip noise
+                if term in ("none", "n/a", "na", "null", ""):
+                    continue
+                if term and 1 < len(term) < 30 and term not in keywords and term != query.lower():
+                    keywords.append(term)
 
-        # Return both original query and the expanded version
-        if first_line and len(first_line) > 3 and first_line != query:
-            return [query, first_line]
-        else:
-            return [query]
+            if keywords:
+                return [query] + keywords[:2]
 
-    except Exception as e:
-        print(f"Warning: Query expansion failed: {e}")
-        return [query]
+    except (urllib.error.URLError, TimeoutError):
+        pass
+    except Exception:
+        pass
+
+    return [query]
 
 
 def is_available() -> bool:
     """Check if query expansion is available."""
-    return get_model_path() is not None
+    return _find_model() is not None

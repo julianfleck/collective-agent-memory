@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "collective-agent-memory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Collective memory for AI coding agents - segment, search, and sync sessions across machines"
 readme = "README.md"
 license = "MIT"
@@ -34,7 +34,6 @@ dependencies = [
     "gliner2>=1.0.0",
     "urllib3>=2.0.0",
     "requests>=2.30.0",
-    "llama-cpp-python>=0.2.0",
 ]
 
 [project.optional-dependencies]

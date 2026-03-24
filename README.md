@@ -153,11 +153,30 @@ cam search "error" --since 1d -m wintermute
 | `-a AGENT`      | Agent filter: `claude`, `openclaw`, `cursor`, `codex` |
 | `-m MACHINE`    | Machine filter: `wintermute`, `data`, etc.            |
 | `-s N`          | Snippet length in tokens (5-64, default: 15)          |
+| `--fast`        | Skip query expansion for faster search                |
 | `--json`        | JSON output for scripts                               |
 | `--files`       | Output file paths only                                |
 
 
 **Inline syntax**: `[2h]` for time filters, `@claude` for agent filters, `openclaw@data` for agent+machine.
+
+### Query Expansion
+
+By default, CAM expands your search query using a local LLM via [Ollama](https://ollama.com/). This finds related terms and abbreviations to improve recall:
+
+```
+$ cam "authentication"
+Expanded: "auth", "authn" (1200ms)
+...results...
+```
+
+If Ollama is not installed or running, CAM falls back to the original query only. Use `--fast` to skip expansion:
+
+```bash
+cam "authentication" --fast    # no expansion, instant search
+```
+
+Supported models (in preference order): qwen2:0.5b, qwen2:1.5b, gemma2:2b, phi3:mini, llama3.2, llama3.1.
 
 ## Other Commands
 

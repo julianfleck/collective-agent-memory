@@ -405,7 +405,9 @@ class SearchIndex:
             sql += " AND s.first_timestamp >= ?"
             params.append(since.isoformat())
 
-        sql += " ORDER BY score LIMIT ?"
+        # Order by score with recency boost (newer = higher priority)
+        # Recency factor: 1 + 0.1 / (days_old + 1), gives ~10% boost to today's docs
+        sql += """ ORDER BY score * (1.0 + 0.1 / (julianday('now') - julianday(s.first_timestamp) + 1)) LIMIT ?"""
         params.append(limit)
 
         results = []

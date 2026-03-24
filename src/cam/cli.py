@@ -417,16 +417,47 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
     if time_filter:
         since = datetime.now(timezone.utc) - time_filter
 
-    # Run search
-    results = index.search(
-        query=query,
-        limit=limit,
-        agent=agent_filter,
-        machine=machine_filter,
-        since=since,
-        snippet_tokens=snippet_tokens,
-        fast=fast,
-    )
+    # Expand query (unless --fast)
+    import time
+    if fast:
+        queries = [query]
+        expand_time = 0
+    else:
+        from cam.expand import expand_query, is_available
+        if is_available():
+            t0 = time.perf_counter()
+            queries = expand_query(query)
+            expand_time = (time.perf_counter() - t0) * 1000
+        else:
+            queries = [query]
+            expand_time = 0
+
+    # Show expanded query (unless JSON/files output)
+    if not json_output and not files_output and len(queries) > 1:
+        expanded = ", ".join(f'"{q}"' for q in queries[1:])
+        console.print(f"[dim]Expanded: {expanded} ({expand_time:.0f}ms)[/dim]")
+
+    # Run search for each query and merge results
+    all_results = []
+    seen_paths = set()
+    for q in queries:
+        results = index.search(
+            query=q,
+            limit=limit,
+            agent=agent_filter,
+            machine=machine_filter,
+            since=since,
+            snippet_tokens=snippet_tokens,
+            fast=True,  # Already expanded above
+        )
+        for r in results:
+            if r.path not in seen_paths:
+                all_results.append(r)
+                seen_paths.add(r.path)
+
+    # Sort by score and limit
+    all_results.sort(key=lambda r: -r.score)
+    results = all_results[:limit]
 
     if not results:
         console.print("[dim]No results found[/dim]")
