@@ -35,6 +35,8 @@ import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
+from cam.search import SearchIndex
+
 # Configuration
 IDLE_TIMEOUT = 300  # 5 minutes of no activity before queueing
 DEBOUNCE_SECONDS = 5  # Wait for rapid changes to settle
@@ -403,6 +405,11 @@ class IndexWorker:
         self.sync_repo = sync_repo
         self.running = True
         self.models_loaded = False
+        # Initialize search index
+        self.search_index = SearchIndex(
+            output_dir.parent / "index.sqlite",
+            workspace_dir=output_dir
+        )
 
     def load_models(self):
         """Load all ML models into memory."""
@@ -434,25 +441,28 @@ class IndexWorker:
 
             if len(messages) < 6:
                 log.info(f"Skipping {session_file.name} ({len(messages)} messages)")
-                return 0  # Skipped
+                return (0, [])  # Skipped, no paths
 
             sections, _ = segment.segment_session(messages)
-            segment.write_sections(
+            written_paths = segment.write_sections(
                 messages, sections, session_meta,
                 output_dir=self.output_dir,
                 machine_id=self.machine_id
             )
-            return len(sections)
+            return (len(sections), written_paths)
 
         try:
             # Run with timeout
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(do_index)
                 try:
-                    num_sections = future.result(timeout=SESSION_TIMEOUT)
+                    num_sections, written_paths = future.result(timeout=SESSION_TIMEOUT)
                     mark_session_indexed(session_path)
                     if num_sections > 0:
                         log.info(f"Indexed {session_file.name}: {num_sections} sections")
+                        # Update search index with new segments
+                        if written_paths:
+                            self.search_index.index_segments(written_paths)
                     return True
                 except FuturesTimeoutError:
                     log.error(f"Timeout indexing {session_file.name} (>{SESSION_TIMEOUT}s)")
@@ -466,94 +476,11 @@ class IndexWorker:
             mark_session_indexed(session_path)
             return False
 
-    def _find_qmd(self) -> str | None:
-        """Find qmd executable.
-
-        Launchd/systemd have limited PATH, so we first try the user's login
-        shell to find qmd, then fall back to known installation paths.
-        """
-        # First: check current PATH (works if daemon inherits full environment)
-        qmd_path = shutil.which("qmd")
-        if qmd_path:
-            return qmd_path
-
-        # Second: ask user's login shell (gets their full PATH from profile)
-        try:
-            result = subprocess.run(
-                ["bash", "-lc", "which qmd"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-
-        # Third: check known installation paths
-        home = Path.home()
-        search_paths = [
-            "/opt/homebrew/bin/qmd",      # macOS Homebrew (Apple Silicon)
-            "/usr/local/bin/qmd",          # macOS Homebrew (Intel) / Linux local
-            "/usr/bin/qmd",                # Linux system
-            home / ".local/bin/qmd",       # pip/pipx user install
-            home / ".npm-global/bin/qmd",  # npm with custom prefix
-        ]
-
-        # Check nvm installations
-        nvm_dir = home / ".nvm/versions/node"
-        if nvm_dir.exists():
-            for node_version in sorted(nvm_dir.iterdir(), reverse=True):
-                nvm_qmd = node_version / "bin/qmd"
-                if nvm_qmd.exists():
-                    return str(nvm_qmd)
-
-        for path in search_paths:
-            p = Path(path) if isinstance(path, str) else path
-            if p.exists():
-                return str(p)
-
-        return None
-
-    def update_qmd(self):
-        """Update qmd search index (incremental)."""
-        qmd_path = self._find_qmd()
-        if qmd_path:
-            # Use qmd update for incremental indexing (faster than remove/add)
-            result = subprocess.run(
-                [qmd_path, "update"],
-                capture_output=True, text=True, env=_clean_env()
-            )
-            if result.returncode == 0:
-                log.debug("Updated qmd index")
-            else:
-                # Fallback: ensure collection exists
-                subprocess.run(
-                    [qmd_path, "collection", "add", str(self.output_dir), "--name", "sessions"],
-                    capture_output=True, env=_clean_env()
-                )
-
-    def embed_qmd(self):
-        """Run qmd embed in background to generate vector embeddings."""
-        qmd_path = self._find_qmd()
-        if not qmd_path:
-            log.debug("qmd not found, skipping embed")
-            return
-
-        # Check if embed is already running
-        if hasattr(self, '_embed_process') and self._embed_process is not None:
-            if self._embed_process.poll() is None:
-                log.debug("qmd embed still running, skipping")
-                return
-            # Previous process finished
-            self._embed_process = None
-
-        # Start embed in background
-        log.info("Starting qmd embed in background")
-        self._embed_process = subprocess.Popen(
-            [qmd_path, "embed"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_clean_env()
-        )
+    def update_search_index(self, segment_paths: List[Path]):
+        """Update search index with new segments."""
+        if segment_paths:
+            count = self.search_index.index_segments(segment_paths)
+            log.debug(f"Updated search index: {count} segments")
 
     def run_loop(self):
         """Main worker loop - processes queue items."""
@@ -566,14 +493,10 @@ class IndexWorker:
         if self.sync_repo:
             do_sync(self.output_dir, self.sync_repo, self.machine_id)
 
-        sessions_indexed = 0
         sessions_indexed_since_sync = 0
         consecutive_failures = 0
         max_consecutive_failures = 10  # Restart daemon after this many failures
-        last_qmd_update = datetime.now()
-        last_qmd_embed = datetime.now()
         last_sync = datetime.now()
-        EMBED_INTERVAL = 300  # 5 minutes between embed runs
 
         while self.running:
             try:
@@ -581,9 +504,8 @@ class IndexWorker:
                 session_path = queue_pop()
 
                 if session_path:
-                    # Index the session
+                    # Index the session (search index updated inline)
                     if self.index_session(session_path):
-                        sessions_indexed += 1
                         sessions_indexed_since_sync += 1
                         consecutive_failures = 0  # Reset on success
                     else:
@@ -593,21 +515,8 @@ class IndexWorker:
                             # Exit to let launchd/systemd restart us fresh
                             self.running = False
                             break
-
-                    # Update qmd periodically (not after every session)
-                    if (datetime.now() - last_qmd_update).total_seconds() > 60:
-                        if sessions_indexed > 0:
-                            self.update_qmd()
-                            sessions_indexed = 0
-                            last_qmd_update = datetime.now()
                 else:
-                    # Queue empty, update qmd if we indexed anything
-                    if sessions_indexed > 0:
-                        self.update_qmd()
-                        sessions_indexed = 0
-                        last_qmd_update = datetime.now()
-
-                    # Sync if we have new segments or enough time has passed
+                    # Queue empty - sync if we have new segments or enough time has passed
                     time_since_sync = (datetime.now() - last_sync).total_seconds()
                     should_sync = (
                         self.sync_repo and
@@ -618,12 +527,6 @@ class IndexWorker:
                         if do_sync(self.output_dir, self.sync_repo, self.machine_id):
                             sessions_indexed_since_sync = 0
                         last_sync = datetime.now()
-
-                    # Run qmd embed periodically when idle (runs in background, skips if already running)
-                    time_since_embed = (datetime.now() - last_qmd_embed).total_seconds()
-                    if time_since_embed >= EMBED_INTERVAL:
-                        self.embed_qmd()
-                        last_qmd_embed = datetime.now()
 
                     # Wait before checking again
                     time.sleep(QUEUE_POLL_INTERVAL)
@@ -639,10 +542,6 @@ class IndexWorker:
                     self.running = False
                     break
                 time.sleep(10)
-
-        # Final updates
-        if sessions_indexed > 0:
-            self.update_qmd()
 
         # Final sync
         if self.sync_repo and sessions_indexed_since_sync > 0:

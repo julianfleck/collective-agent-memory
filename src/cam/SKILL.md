@@ -10,23 +10,13 @@ Search past sessions to find previous work, decisions, code patterns, or context
 ## Search Commands
 
 ```bash
-# Quick search (hybrid with reranking - best quality)
+# Quick search (SQLite FTS5 with weighted fields)
 cam "authentication flow"
 cam "error handling" -t 2h             # with time filter
 cam "API design" -n 20                 # more results
 
-# Keyword search (fast, uses qmd)
+# Explicit search command
 cam search "authentication flow" -t 1d
-
-# Semantic search (vector similarity)
-cam vsearch "how to handle user login" -t 3d
-
-# Hybrid search with reranking (explicit)
-cam query "error handling patterns" -t 2h
-
-# Entity search (find by tool, file, concept)
-cam entity "docker"                    # sessions using Docker
-cam entity "config.json"               # sessions with config.json
 
 # Browse recent (no search query)
 cam -t 1h                              # last hour's segments
@@ -60,6 +50,7 @@ cam "database" --files                 # file paths only
 ```bash
 cam status              # Show status (indexed sessions, segments)
 cam index               # Index new local sessions
+cam reindex             # Rebuild search index from segments
 cam sync                # Sync with remote repo (if configured)
 cam logs -f             # Follow daemon logs
 cam update              # Update CAM to latest version

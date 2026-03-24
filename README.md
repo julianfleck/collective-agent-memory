@@ -12,14 +12,14 @@ CAM indexes sessions from Claude Code, Cursor, OpenClaw, and Codex CLI, segments
 
 ## What It Does
 
-- **Search past sessions** - Find previous work with keyword, semantic, or hybrid search
+- **Search past sessions** - Find previous work with fast weighted keyword search
 - **Entity search** - Find sessions mentioning specific tools, files, concepts, or people
 - **Filter by time** - Get only recent results: last 2 hours, last day, last week
 - **Filter by agent** - Search only Claude, OpenClaw, or other specific agents
 - **Shared memory** - Sync sessions across machines so all agents can search everything
 - **Topic segmentation** - Sessions are automatically split into coherent topics with keywords
 - **Entity extraction** - Typed entities (tools, files, concepts, etc.) are extracted and added to the session metadata
-- **Fast local search** - Powered by [qmd](https://github.com/tobi/qmd) for instant results
+- **Fast local search** - SQLite FTS5 with weighted fields (title, keywords, entities, body)
 
 ## Install
 
@@ -44,11 +44,8 @@ The installer + `cam init` writes the required `CAM_*` config automatically, so 
 ### Basic Search
 
 ```bash
-cam "authentication flow"              # hybrid search with reranking (default)
-cam query "authentication flow"        # same thing, explicit
-
-cam search "error handling"            # keyword search (fast)
-cam vsearch "how to deploy"            # semantic search (vector similarity)
+cam "authentication flow"              # search with weighted ranking (default)
+cam search "error handling"            # explicit search command
 ```
 
 ### Time Filters
@@ -125,14 +122,13 @@ cam search "auth" -t 2h -a claude -n 20
 
 | Command               | Description                                     |
 | --------------------- | ----------------------------------------------- |
-| `cam "query"`         | Hybrid search with reranking (default)          |
-| `cam query "query"`   | Same as above, explicit                         |
-| `cam search "query"`  | Keyword search (fast)                           |
-| `cam vsearch "query"` | Semantic search (vector similarity)             |
+| `cam "query"`         | Search with weighted ranking (default)          |
+| `cam search "query"`  | Explicit search command                         |
 | `cam entity "name"`   | Search by extracted entity (tools, files, etc.) |
 | `cam [15min]`         | List recent session segments (no search query)  |
 | `cam recent`          | List session segments from last 24h             |
 | `cam get <path>`      | Retrieve a session segment file by path         |
+| `cam reindex`         | Rebuild search index from segments              |
 
 
 ## Search Options
@@ -182,7 +178,7 @@ cam skill install -a openclaw  # install skill to OpenClaw
 1. **Segment**: Sessions are split into topics using embedding similarity (sentence-transformers)
 2. **Extract keywords**: Topic keywords are extracted for each segment (KeyBERT)
 3. **Extract entities**: Typed entities (tools, files, concepts) are extracted (GLiNER2)
-4. **Index**: Segments are indexed locally for fast search (qmd)
+4. **Index**: Segments are indexed locally with SQLite FTS5 (weighted: title 10x, keywords 5x, entities 3x, body 1x)
 5. **Sync**: Segments optionally sync to GitHub for cross-machine access
 
 ## Session Storage
@@ -338,11 +334,11 @@ uv tool install "collective-agent-memory @ git+https://github.com/julianfleck/co
 # Or with pip
 pip install git+https://github.com/julianfleck/collective-agent-memory.git
 
-# Install qmd (search engine)
-npm install -g @tobilu/qmd
-
 # Index your sessions
 cam index
+
+# Build search index
+cam reindex
 
 # (Optional) Set up sync
 export CAM_SYNC_REPO="youruser/agent-memory"
@@ -356,14 +352,13 @@ cam skill install
 
 - **Python 3.10+**: Core runtime
 - **uv**: Recommended package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **qmd**: Fast local search ([npm install -g @tobilu/qmd](https://github.com/tobi/qmd))
+- **SQLite**: Search index (included with Python)
 - **sentence-transformers**: Topic segmentation
 - **KeyBERT**: Keyword extraction
 - **GLiNER2**: Entity extraction (205M params, [fastino-ai/GLiNER2](https://github.com/fastino-ai/GLiNER2))
 
 ## Credits
 
-- Search powered by [qmd](https://github.com/tobi/qmd) by Tobi Lütke
 - Topic segmentation via [sentence-transformers](https://www.sbert.net/)
 - Keywords via [KeyBERT](https://github.com/MaartenGr/KeyBERT)
 - Entity extraction via [GLiNER2](https://github.com/fastino-ai/GLiNER2)

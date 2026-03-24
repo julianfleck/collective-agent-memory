@@ -317,8 +317,6 @@ def run_index(workspace_dir: Path, foreground: bool = True) -> bool:
     if foreground:
         # Run in foreground with output visible
         result = subprocess.run([cam_bin, "index"], env=env)
-        # Ensure qmd collection is set up after indexing
-        ensure_qmd_collection(workspace_dir)
         return result.returncode == 0
     else:
         # Run in background
@@ -329,39 +327,6 @@ def run_index(workspace_dir: Path, foreground: bool = True) -> bool:
             stderr=subprocess.DEVNULL
         )
         return True
-
-
-def ensure_qmd_collection(workspace_dir: Path) -> bool:
-    """Ensure qmd collection is properly set up for the workspace."""
-    if not shutil.which("qmd"):
-        return False
-
-    # Check if collection exists and has files
-    result = subprocess.run(
-        ["qmd", "collection", "list"],
-        capture_output=True,
-        text=True
-    )
-
-    # Look for "sessions" collection with 0 files or missing
-    needs_setup = True
-    if result.returncode == 0:
-        lines = result.stdout.split('\n')
-        for i, line in enumerate(lines):
-            if 'sessions' in line and 'qmd://sessions' in line:
-                # Check next line for file count
-                if i + 1 < len(lines) and 'Files:' in lines[i + 1]:
-                    file_count = lines[i + 1].split('Files:')[1].strip().split()[0]
-                    if file_count != '0':
-                        needs_setup = False
-                break
-
-    if needs_setup:
-        subprocess.run(["qmd", "collection", "remove", "sessions"], capture_output=True)
-        subprocess.run(["qmd", "collection", "add", str(workspace_dir), "--name", "sessions"], capture_output=True)
-        return True
-
-    return False
 
 
 def run_init(non_interactive: bool = False):
@@ -557,9 +522,6 @@ def run_init(non_interactive: bool = False):
             else:
                 console.print()
                 console.print("[dim]Run 'cam index' to index sessions later[/dim]")
-
-    # Ensure qmd collection is set up (even if indexing was skipped or ran in background)
-    ensure_qmd_collection(workspace_dir)
 
     # Final summary
     console.print()

@@ -5,8 +5,9 @@ CAM - Collective Agent Memory
 CLI for segmenting, searching, and syncing AI agent sessions across machines.
 
 Usage:
-    cam "query"                 # Search sessions (via qmd)
+    cam "query"                 # Search sessions (SQLite FTS5)
     cam search "query"          # Explicit search
+    cam reindex                 # Rebuild search index
     cam sync                    # Sync with remote repo
     cam index                   # Index new sessions
     cam segment <file.jsonl>    # Segment a single session
@@ -33,6 +34,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+
+from cam.search import SearchIndex
 
 console = Console()
 
@@ -540,6 +543,86 @@ def display_results(results: list, workspace_dir: Path = None) -> None:
 # Commands
 # =============================================================================
 
+def _run_search(query: str, limit: int = 10, json_output: bool = False,
+                files_output: bool = False, agent_filter: str = None,
+                time_filter: timedelta = None) -> int:
+    """Run search using SQLite FTS5 index.
+
+    Args:
+        query: Search query
+        limit: Maximum number of results
+        json_output: Output as JSON
+        files_output: Output file paths only
+        agent_filter: Filter by agent name
+        time_filter: Filter to results within this timedelta
+
+    Returns:
+        0 on success, 1 on error
+    """
+    workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
+
+    # Check if index exists
+    if not index_path.exists():
+        console.print("[yellow]Search index not found. Building index...[/yellow]")
+        index = SearchIndex(index_path, workspace_dir)
+        count = index.rebuild(workspace_dir)
+        console.print(f"[green]Indexed {count} segments[/green]")
+    else:
+        index = SearchIndex(index_path, workspace_dir)
+
+    # Calculate since timestamp from time_filter
+    since = None
+    if time_filter:
+        since = datetime.now(timezone.utc) - time_filter
+
+    # Run search
+    results = index.search(
+        query=query,
+        limit=limit,
+        agent=agent_filter,
+        since=since,
+    )
+
+    if not results:
+        console.print("[dim]No results found[/dim]")
+        return 0
+
+    # Format output
+    if json_output:
+        formatted = []
+        for r in results:
+            formatted.append({
+                "path": r.path,
+                "date": r.date,
+                "timestamp": r.first_timestamp or "",
+                "agent": r.agent,
+                "machine": r.machine,
+                "title": r.title,
+                "score": r.score,
+            })
+        print(json.dumps(formatted, indent=2))
+    elif files_output:
+        for r in results:
+            print(r.path)
+    else:
+        for r in results:
+            # Format timestamp for display
+            display_date = r.date
+            if r.first_timestamp:
+                try:
+                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
+                    display_date = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
+            console.print(f"  [dim]{r.path}[/dim]  [green]{r.score:.0f}%[/green]")
+            console.print()
+
+    return 0
+
+
 def _run_qmd_search(query: str, mode: str, collection: str = "sessions",
                     limit: int = None, json_output: bool = False,
                     files_output: bool = False,
@@ -651,11 +734,13 @@ def cmd_search(args: argparse.Namespace) -> int:
         print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
         return 1
 
-    return _run_qmd_search(
-        query, "search", args.collection,
-        args.limit, args.json, args.files,
-        agent_filter,
-        time_filter
+    return _run_search(
+        query,
+        limit=args.limit or 10,
+        json_output=args.json,
+        files_output=args.files,
+        agent_filter=agent_filter,
+        time_filter=time_filter
     )
 
 
@@ -771,11 +856,15 @@ def cmd_vsearch(args: argparse.Namespace) -> int:
         print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
         return 1
 
-    return _run_qmd_search(
-        query, "vsearch", args.collection,
-        args.limit, args.json, args.files,
-        agent_filter,
-        time_filter
+    # Note: vsearch now uses the same FTS5 search as keyword search
+    # The rich frontmatter provides good keyword coverage
+    return _run_search(
+        query,
+        limit=args.limit or 10,
+        json_output=args.json,
+        files_output=args.files,
+        agent_filter=agent_filter,
+        time_filter=time_filter
     )
 
 
@@ -807,11 +896,15 @@ def cmd_query(args: argparse.Namespace) -> int:
         print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
         return 1
 
-    return _run_qmd_search(
-        query, "query", args.collection,
-        args.limit, args.json, args.files,
-        agent_filter,
-        time_filter
+    # Note: query/hybrid now uses the same FTS5 search
+    # The rich frontmatter provides good keyword coverage
+    return _run_search(
+        query,
+        limit=args.limit or 10,
+        json_output=args.json,
+        files_output=args.files,
+        agent_filter=agent_filter,
+        time_filter=time_filter
     )
 
 
@@ -907,8 +1000,6 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     if not new_sessions:
         print("\nNo new sessions to index.")
-        # Still ensure qmd collection is set up
-        ensure_qmd_collection(output_dir)
         return 0
 
     console.print(f"\n[bold]{len(new_sessions)} new sessions to index[/bold]")
@@ -923,8 +1014,6 @@ def cmd_index(args: argparse.Namespace) -> int:
         )
         console.print(f"[green]Queued {queued} sessions for background indexing[/green]")
         console.print("[dim]Run 'cam status' to check progress[/dim]")
-        # Ensure qmd collection is set up
-        ensure_qmd_collection(output_dir)
         return 0
 
     # Daemon not running - index directly
@@ -978,16 +1067,47 @@ def cmd_index(args: argparse.Namespace) -> int:
 
             progress.advance(task)
 
-    # Update qmd collection
-    if shutil.which("qmd"):
-        subprocess.run(["qmd", "collection", "remove", "sessions"], capture_output=True)
-        subprocess.run(["qmd", "collection", "add", str(output_dir), "--name", "sessions"], capture_output=True)
-
     # Summary
     if errors > 0:
         console.print(f"[green]Indexed {count} sessions[/green] [dim]({errors} errors)[/dim]")
     else:
         console.print(f"[green]Indexed {count} sessions[/green]")
+    return 0
+
+
+def cmd_reindex(args: argparse.Namespace) -> int:
+    """Rebuild the search index from all segment files.
+
+    This scans all existing segments in the workspace and rebuilds
+    the SQLite FTS5 search index from scratch.
+    """
+    workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
+
+    console.print(f"[bold]Rebuilding search index...[/bold]")
+    console.print(f"[dim]Workspace: {workspace_dir}[/dim]")
+    console.print(f"[dim]Index: {index_path}[/dim]")
+
+    # Create fresh index
+    index = SearchIndex(index_path, workspace_dir)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Scanning segments...", total=None)
+
+        # Find all segment files
+        segment_files = list(workspace_dir.rglob("*.md"))
+        progress.update(task, description=f"Found {len(segment_files)} segments")
+
+        # Clear and rebuild
+        progress.update(task, description="Building index...")
+        count = index.rebuild(workspace_dir)
+
+    stats = index.get_stats()
+    console.print(f"\n[green]Indexed {stats.segments} segments from {stats.sessions} sessions[/green]")
     return 0
 
 
@@ -1045,12 +1165,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 print(f"  Push failed: {push_result.stderr}", file=sys.stderr)
         else:
             print("No new segments to push")
-
-    # Update qmd index
-    if shutil.which("qmd"):
-        subprocess.run(["qmd", "collection", "remove", "sessions"], capture_output=True)
-        subprocess.run(["qmd", "collection", "add", str(workspace_dir), "--name", "sessions"],
-                      capture_output=True)
 
     console.print("[green]Sync complete[/green]")
     return 0
@@ -1123,40 +1237,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         indexed = [s for s in state_file.read_text().strip().split('\n') if s]
         console.print(f"Indexed:  {len(indexed)} sessions")
 
-    # qmd status
+    # Search index status
     console.print()
-    if shutil.which("qmd"):
-        console.print("[green]\\[ok][/green] qmd installed")
-        # Check embedding status
+    index_path = workspace_dir.parent / "index.sqlite"
+    if index_path.exists():
         try:
-            result = subprocess.run(
-                ["qmd", "status"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                # Parse vectors and pending from qmd status output
-                vectors = 0
-                pending = 0
-                for line in result.stdout.split('\n'):
-                    if 'Vectors:' in line:
-                        parts = line.split()
-                        for i, p in enumerate(parts):
-                            if p == 'Vectors:' and i + 1 < len(parts):
-                                vectors = int(parts[i + 1])
-                    elif 'Pending:' in line:
-                        parts = line.split()
-                        for i, p in enumerate(parts):
-                            if p == 'Pending:' and i + 1 < len(parts):
-                                pending = int(parts[i + 1])
-
-                if pending > 0:
-                    console.print(f"[yellow]\\[..][/yellow] Embeddings: {vectors} vectors, {pending} pending [dim](run 'qmd embed')[/dim]")
-                elif vectors > 0:
-                    console.print(f"[green]\\[ok][/green] Embeddings: {vectors} vectors")
+            index = SearchIndex(index_path, workspace_dir)
+            stats = index.get_stats()
+            console.print(f"[green]\\[ok][/green] Search index: {stats.segments} segments from {stats.sessions} sessions")
         except Exception:
-            pass  # Don't fail status if qmd check fails
+            console.print("[yellow]\\[..][/yellow] Search index: error reading")
     else:
-        console.print("[yellow]--[/yellow] qmd not installed (npm install -g @tobilu/qmd)")
+        console.print("[yellow]--[/yellow] Search index not built [dim](run 'cam reindex')[/dim]")
 
     # Daemon and queue status
     daemon_running = daemon.is_daemon_running()
@@ -1800,6 +1892,8 @@ Output:  -n NUM (result count), --json, --files
     p_index.add_argument("--no-queue", action="store_true",
                          help="Index directly instead of queuing")
 
+    subparsers.add_parser("reindex", help="Rebuild search index from segments")
+
     p_sync = subparsers.add_parser("sync", help="Sync with GitHub repo")
     p_sync.add_argument("-r", "--repo", help="GitHub repo (user/repo)")
     p_sync.add_argument("--pull-only", action="store_true")
@@ -1841,7 +1935,7 @@ Output:  -n NUM (result count), --json, --files
 
     # Handle bare search query with inline filters
     # e.g., cam "query" [2h] @claude or cam [15min] or cam -t 30min
-    known_cmds = {"search", "vsearch", "query", "segment", "index", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
+    known_cmds = {"search", "vsearch", "query", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
 
     # Handle cam -t TIME (shorthand for cam recent -t TIME)
     if argv and argv[0] in ("-t", "--time") and len(argv) >= 2:
@@ -1887,6 +1981,8 @@ Output:  -n NUM (result count), --json, --files
         return cmd_segment(args)
     elif args.command == "index":
         return cmd_index(args)
+    elif args.command == "reindex":
+        return cmd_reindex(args)
     elif args.command == "sync":
         return cmd_sync(args)
     elif args.command == "status":
