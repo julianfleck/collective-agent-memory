@@ -63,12 +63,32 @@ def format_result(result: SearchResult, show_score: bool = False, workspace_dir:
     # Full path
     full_path = workspace_dir / result.path
 
-    # Date/time
+    # Date/time with relative time
     display_datetime = result.date
+    relative_time = ""
     if result.first_timestamp:
         try:
             dt = datetime.fromisoformat(result.first_timestamp.replace('Z', '+00:00'))
             display_datetime = dt.strftime("%Y-%m-%d %H:%M")
+            # Calculate relative time
+            now = datetime.now(timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = now - dt
+            total_minutes = int(delta.total_seconds() / 60)
+            if total_minutes < 1:
+                relative_time = "just now"
+            elif total_minutes < 60:
+                relative_time = f"{total_minutes}m ago"
+            elif total_minutes < 1440:  # 24 hours
+                hours = total_minutes // 60
+                relative_time = f"{hours}h ago"
+            elif total_minutes < 10080:  # 7 days
+                days = total_minutes // 1440
+                relative_time = f"{days}d ago"
+            else:
+                weeks = total_minutes // 10080
+                relative_time = f"{weeks}w ago"
         except Exception:
             pass
 
@@ -97,7 +117,10 @@ def format_result(result: SearchResult, show_score: bool = False, workspace_dir:
     console.print(f"[bold]Segment:[/bold] {full_path}")
     if show_score:
         console.print(f"[bold]Score:[/bold] [green]{result.score:.0f}%[/green]")
-    console.print(f"[bold]Date:[/bold] {display_datetime}")
+    if relative_time:
+        console.print(f"[bold]Date:[/bold] {display_datetime} [dim]({relative_time})[/dim]")
+    else:
+        console.print(f"[bold]Date:[/bold] {display_datetime}")
     console.print(f"[bold]Agent:[/bold] {agent_machine}")
     console.print(f"[bold]Tags:[/bold] [green]{tags_str}[/green]")
     console.print(f"[bold]Entities:[/bold] [yellow]{entities_str}[/yellow]")
