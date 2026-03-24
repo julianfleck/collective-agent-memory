@@ -1,5 +1,6 @@
 """SQLite FTS5-based search index for CAM segments."""
 
+import math
 import sqlite3
 import re
 from dataclasses import dataclass
@@ -247,6 +248,7 @@ class SearchIndex:
         since: Optional[datetime] = None,
         min_score: float = 20.0,
         dynamic_cutoff: bool = True,
+        snippet_tokens: int = 15,
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
@@ -266,16 +268,22 @@ class SearchIndex:
             since: Filter to segments after this timestamp
             min_score: Minimum score threshold (0-100)
             dynamic_cutoff: Apply dynamic cutoff based on score drops
+            snippet_tokens: Number of tokens in snippet (default 15, max 64)
 
         Returns:
             List of SearchResult objects, sorted by relevance
         """
+        # Clamp snippet tokens
+        snippet_tokens = max(5, min(64, snippet_tokens))
+
         # Try AND query first (precise)
-        results = self._search_fts(query, limit, agent, since, use_or=False)
+        results = self._search_fts(query, limit, agent, since, use_or=False,
+                                   snippet_tokens=snippet_tokens)
 
         # If too few results, try OR query (broad)
         if len(results) < 3:
-            or_results = self._search_fts(query, limit, agent, since, use_or=True)
+            or_results = self._search_fts(query, limit, agent, since, use_or=True,
+                                          snippet_tokens=snippet_tokens)
             # Merge results, preferring AND matches
             seen = {r.path for r in results}
             for r in or_results:
@@ -336,6 +344,7 @@ class SearchIndex:
         agent: Optional[str],
         since: Optional[datetime],
         use_or: bool,
+        snippet_tokens: int = 15,
     ) -> List[SearchResult]:
         """Execute FTS5 search with given query mode."""
         safe_query = self._prepare_query(query, use_or=use_or)
@@ -346,7 +355,7 @@ class SearchIndex:
         # Build the query with optional filters
         # snippet() extracts text around matches: (table, col_idx, start, end, ellipsis, tokens)
         # Column indices: title=0, keywords=1, entities=2, body=3
-        sql = """
+        sql = f"""
             SELECT
                 s.path,
                 s.title,
@@ -356,7 +365,7 @@ class SearchIndex:
                 s.machine,
                 s.first_timestamp,
                 s.last_timestamp,
-                snippet(segments_fts, 3, '', '', '...', 15) as snippet
+                snippet(segments_fts, 3, '', '', '...', {snippet_tokens}) as snippet
             FROM segments_fts
             JOIN segments s ON segments_fts.rowid = s.id
             WHERE segments_fts MATCH ?
@@ -381,9 +390,11 @@ class SearchIndex:
                 cursor = conn.execute(sql, params)
                 for row in cursor:
                     # BM25 returns negative scores (more negative = better match)
-                    # Convert to positive 0-100 scale with better differentiation
+                    # Use log scale for better differentiation at high scores
+                    # Typical range: -5 (weak) to -30 (strong multi-term match)
+                    # Log scale: maps -5 to ~45, -10 to ~60, -20 to ~75, -30 to ~85
                     raw_score = row['score']
-                    normalized_score = min(100, max(0, -raw_score * 5))
+                    normalized_score = min(100, max(0, 25 * math.log1p(-raw_score)))
 
                     results.append(SearchResult(
                         path=row['path'],

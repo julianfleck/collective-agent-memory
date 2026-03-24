@@ -545,7 +545,7 @@ def display_results(results: list, workspace_dir: Path = None) -> None:
 
 def _run_search(query: str, limit: int = 10, json_output: bool = False,
                 files_output: bool = False, agent_filter: str = None,
-                time_filter: timedelta = None) -> int:
+                time_filter: timedelta = None, snippet_tokens: int = 15) -> int:
     """Run search using SQLite FTS5 index.
 
     Args:
@@ -555,6 +555,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         files_output: Output file paths only
         agent_filter: Filter by agent name
         time_filter: Filter to results within this timedelta
+        snippet_tokens: Number of tokens in snippet (5-64)
 
     Returns:
         0 on success, 1 on error
@@ -582,6 +583,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         limit=limit,
         agent=agent_filter,
         since=since,
+        snippet_tokens=snippet_tokens,
     )
 
     if not results:
@@ -746,7 +748,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         json_output=args.json,
         files_output=args.files,
         agent_filter=agent_filter,
-        time_filter=time_filter
+        time_filter=time_filter,
+        snippet_tokens=args.snippet,
     )
 
 
@@ -870,7 +873,8 @@ def cmd_vsearch(args: argparse.Namespace) -> int:
         json_output=args.json,
         files_output=args.files,
         agent_filter=agent_filter,
-        time_filter=time_filter
+        time_filter=time_filter,
+        snippet_tokens=args.snippet,
     )
 
 
@@ -910,7 +914,8 @@ def cmd_query(args: argparse.Namespace) -> int:
         json_output=args.json,
         files_output=args.files,
         agent_filter=agent_filter,
-        time_filter=time_filter
+        time_filter=time_filter,
+        snippet_tokens=args.snippet,
     )
 
 
@@ -1862,6 +1867,8 @@ Output:  -n NUM (result count), --json, --files
         p.add_argument("--files", action="store_true", help="File paths only")
         p.add_argument("-t", "--time", help="Time filter (e.g., 2h, 15min, 3d, 1w)")
         p.add_argument("-a", "--agent", help="Agent filter (e.g., claude, openclaw)")
+        p.add_argument("-s", "--snippet", type=int, default=15,
+                       help="Snippet length in tokens (5-64, default: 15)")
 
     p_search = subparsers.add_parser("search", help="Keyword search")
     add_search_args(p_search)
