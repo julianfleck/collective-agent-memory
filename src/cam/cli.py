@@ -559,6 +559,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
         return 1
 
+    # --fast or --effort low both skip expansion
+    fast = getattr(args, 'fast', False) or getattr(args, 'effort', 'high') == 'low'
+
     return _run_search(
         query,
         limit=args.limit or 10,
@@ -568,7 +571,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         machine_filter=machine_filter,
         time_filter=time_filter,
         snippet_tokens=args.snippet,
-        fast=getattr(args, 'fast', False),
+        fast=fast,
         sort_order=getattr(args, 'sort', None),
     )
 
@@ -576,14 +579,16 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_query(args: argparse.Namespace) -> int:
     """Answer a question using agentic search over session memory.
 
-    1. Extract keywords from the question
-    2. Search for relevant segments
-    3. Read segment content
-    4. Synthesize an answer using local LLM
+    Effort levels:
+    - low (default): expand → search → get top segments → synthesize
+    - high: agentic loop with tool use (future)
     """
+    from rich.status import Status
+
     query = args.query
     verbose = getattr(args, 'verbose', False)
     limit = getattr(args, 'limit', 5)
+    effort = getattr(args, 'effort', 'low')
 
     if not query:
         print("Error: query required", file=sys.stderr)
@@ -599,80 +604,103 @@ def cmd_query(args: argparse.Namespace) -> int:
     if verbose:
         console.print(f"[dim]Using model: {model}[/dim]")
 
-    # Step 1: Extract keywords
-    if verbose:
-        console.print("[dim]Extracting keywords...[/dim]")
+    # For now, both effort levels use the same flow
+    # High effort with agentic loop is future work
+    if effort == 'high':
+        console.print("[yellow]Note: --effort high not yet implemented, using low[/yellow]")
 
-    from cam.expand import _extract_keywords
-    keywords = _extract_keywords(query)
+    # Start spinner for non-verbose mode
+    status = None if verbose else Status("Thinking...", console=console)
+    if status:
+        status.start()
 
-    if verbose:
-        console.print(f"[dim]Keywords: {', '.join(keywords)}[/dim]")
+    try:
+        # Step 1: Extract keywords
+        if verbose:
+            console.print("[dim]Extracting keywords...[/dim]")
+        elif status:
+            status.update("Extracting keywords...")
 
-    # Step 2: Search for relevant segments
-    workspace_dir = get_workspace_dir()
-    index_path = workspace_dir.parent / "index.sqlite"
+        from cam.expand import _extract_keywords
+        keywords = _extract_keywords(query)
 
-    if not index_path.exists():
-        print("Error: Search index not found. Run 'cam reindex' first.", file=sys.stderr)
-        return 1
+        if verbose:
+            console.print(f"[dim]Keywords: {', '.join(keywords)}[/dim]")
 
-    index = SearchIndex(index_path, workspace_dir)
+        # Step 2: Search for relevant segments
+        if status:
+            status.update("Searching...")
 
-    # Search with extracted keywords
-    search_query = ' '.join(keywords)
-    results = index.search(
-        query=search_query,
-        limit=limit,
-        fast=True,  # Keywords already extracted
-    )
+        workspace_dir = get_workspace_dir()
+        index_path = workspace_dir.parent / "index.sqlite"
 
-    if not results:
-        console.print("[yellow]No relevant segments found.[/yellow]")
-        return 0
+        if not index_path.exists():
+            if status:
+                status.stop()
+            print("Error: Search index not found. Run 'cam reindex' first.", file=sys.stderr)
+            return 1
 
-    if verbose:
-        console.print(f"[dim]Found {len(results)} relevant segments[/dim]")
-        for r in results:
-            console.print(f"[dim]  - {r.path} (score: {r.score:.0f}%)[/dim]")
+        index = SearchIndex(index_path, workspace_dir)
 
-    # Step 3: Read segment content
-    if verbose:
-        console.print("[dim]Reading segment content...[/dim]")
+        search_query = ' '.join(keywords)
+        results = index.search(
+            query=search_query,
+            limit=limit,
+            fast=True,
+        )
 
-    context_parts = []
-    for r in results[:3]:  # Top 3 segments for context
-        segment_path = workspace_dir / r.path
-        if segment_path.exists():
-            try:
-                content = segment_path.read_text()
-                # Extract body (skip frontmatter)
-                if '---' in content:
-                    parts = content.split('---', 2)
-                    if len(parts) >= 3:
-                        body = parts[2].strip()
+        if not results:
+            if status:
+                status.stop()
+            console.print("[yellow]No relevant segments found.[/yellow]")
+            return 0
+
+        if verbose:
+            console.print(f"[dim]Found {len(results)} relevant segments[/dim]")
+            for r in results:
+                console.print(f"[dim]  - {r.path} (score: {r.score:.0f}%)[/dim]")
+
+        # Step 3: Read segment content
+        if verbose:
+            console.print("[dim]Reading segments...[/dim]")
+        elif status:
+            status.update("Reading segments...")
+
+        context_parts = []
+        for r in results[:3]:
+            segment_path = workspace_dir / r.path
+            if segment_path.exists():
+                try:
+                    content = segment_path.read_text()
+                    if '---' in content:
+                        parts = content.split('---', 2)
+                        if len(parts) >= 3:
+                            body = parts[2].strip()
+                        else:
+                            body = content
                     else:
                         body = content
-                else:
-                    body = content
-                # Truncate if too long
-                if len(body) > 3000:
-                    body = body[:3000] + "..."
-                context_parts.append(f"## {r.title or r.path}\n{body}")
-            except Exception:
-                pass
+                    if len(body) > 3000:
+                        body = body[:3000] + "..."
+                    context_parts.append(f"## {r.title or r.path}\n{body}")
+                except Exception:
+                    pass
 
-    if not context_parts:
-        console.print("[yellow]Could not read segment content.[/yellow]")
-        return 0
+        if not context_parts:
+            if status:
+                status.stop()
+            console.print("[yellow]Could not read segment content.[/yellow]")
+            return 0
 
-    context = "\n\n---\n\n".join(context_parts)
+        context = "\n\n---\n\n".join(context_parts)
 
-    # Step 4: Synthesize answer
-    if verbose:
-        console.print("[dim]Synthesizing answer...[/dim]\n")
+        # Step 4: Synthesize answer
+        if verbose:
+            console.print("[dim]Synthesizing answer...[/dim]\n")
+        elif status:
+            status.update("Synthesizing answer...")
 
-    prompt = f"""Based on the following session segments, answer the query concisely.
+        prompt = f"""Based on the following session segments, answer the query concisely.
 If the answer is not in the segments, say so.
 
 Query: {query}
@@ -682,13 +710,20 @@ Relevant segments:
 
 Answer:"""
 
-    answer = _call_ollama(prompt, timeout=60)
+        answer = _call_ollama(prompt, timeout=60)
 
-    if answer:
-        console.print(answer)
-    else:
-        console.print("[red]Failed to generate answer.[/red]")
-        return 1
+        if status:
+            status.stop()
+
+        if answer:
+            console.print(answer)
+        else:
+            console.print("[red]Failed to generate answer.[/red]")
+            return 1
+
+    finally:
+        if status:
+            status.stop()
 
     return 0
 
@@ -1285,11 +1320,12 @@ def cmd_get(args: argparse.Namespace) -> int:
     workspace_dir = get_workspace_dir()
     segment_path = args.path
 
-    # Remove leading slash if present
-    segment_path = segment_path.lstrip('/')
-
-    # Build full path
-    full_path = workspace_dir / segment_path
+    # Handle absolute paths
+    if segment_path.startswith('/'):
+        full_path = Path(segment_path)
+    else:
+        # Relative path - join with workspace dir
+        full_path = workspace_dir / segment_path
 
     if not full_path.exists():
         print(f"Error: Session segment not found: {segment_path}", file=sys.stderr)
@@ -1560,7 +1596,7 @@ Speed:   --fast (skip query expansion for faster search)
         description=help_text,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-v", "--version", action="version", version=f"cam {version_str}")
+    parser.add_argument("-V", "--version", action="version", version=f"cam {version_str}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
@@ -1577,7 +1613,9 @@ Speed:   --fast (skip query expansion for faster search)
         p.add_argument("-s", "--snippet", type=int, default=15,
                        help="Snippet length in tokens (5-64, default: 15)")
         p.add_argument("--fast", action="store_true",
-                       help="Skip query expansion for faster search")
+                       help="Skip query expansion (same as --effort low)")
+        p.add_argument("-e", "--effort", choices=['low', 'high'], default='high',
+                       help="Effort: low (no expansion) or high (with expansion, default)")
         p.add_argument("--sort", choices=['date', 'newest', 'oldest', 'score', 'best'],
                        help="Sort order: date/newest, oldest, score/best (default: score+recency)")
 
@@ -1587,7 +1625,9 @@ Speed:   --fast (skip query expansion for faster search)
     p_query = subparsers.add_parser("query", help="Answer questions using session memory")
     p_query.add_argument("query", help="Question to answer")
     p_query.add_argument("-n", "--limit", type=int, default=5, help="Number of segments to search")
-    p_query.add_argument("--verbose", action="store_true", help="Show search steps")
+    p_query.add_argument("-v", "--verbose", action="store_true", help="Show search steps")
+    p_query.add_argument("-e", "--effort", choices=['low', 'high'], default='low',
+                         help="Effort level: low (default) or high (agentic loop)")
 
     p_entity = subparsers.add_parser("entity", help="Search by entity")
     p_entity.add_argument("entity", help="Entity name to search for")
