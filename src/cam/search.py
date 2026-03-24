@@ -508,6 +508,145 @@ class SearchIndex:
 
         return IndexStats(segments=segments, sessions=sessions)
 
+    def search_entities(
+        self,
+        entity_name: str,
+        limit: int = 10,
+        agent: Optional[str] = None,
+        snippet_tokens: int = 15,
+    ) -> List[SearchResult]:
+        """Search segments by entity name.
+
+        Searches the entities column for matching entity names.
+
+        Args:
+            entity_name: Entity name to search for (case-insensitive)
+            limit: Maximum number of results
+            agent: Filter by agent name
+            snippet_tokens: Number of tokens in snippet
+
+        Returns:
+            List of SearchResult objects, sorted by date descending
+        """
+        # Search entities column using FTS5
+        # Entities are space-separated in the index
+        query = entity_name.lower().replace('-', ' ').replace('_', ' ')
+
+        sql = f"""
+            SELECT
+                s.path,
+                s.title,
+                s.date,
+                s.agent,
+                s.machine,
+                s.first_timestamp,
+                s.last_timestamp,
+                s.entities,
+                snippet(segments_fts, 2, '', '', '...', {snippet_tokens}) as snippet
+            FROM segments_fts
+            JOIN segments s ON segments_fts.rowid = s.id
+            WHERE segments_fts MATCH 'entities:' || ?
+        """
+        params = [query + '*']
+
+        if agent:
+            sql += " AND s.agent = ?"
+            params.append(agent)
+
+        sql += " ORDER BY s.first_timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        results = []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                cursor = conn.execute(sql, params)
+                for row in cursor:
+                    results.append(SearchResult(
+                        path=row['path'],
+                        title=row['title'],
+                        score=100.0,  # Entity matches are exact
+                        date=row['date'],
+                        agent=row['agent'],
+                        machine=row['machine'],
+                        first_timestamp=row['first_timestamp'],
+                        last_timestamp=row['last_timestamp'],
+                        snippet=row['entities'],  # Show matched entities
+                    ))
+            except sqlite3.OperationalError:
+                pass
+
+        return results
+
+    def list_recent(
+        self,
+        since: datetime,
+        limit: int = 20,
+        agent: Optional[str] = None,
+    ) -> List[SearchResult]:
+        """List recent segments by timestamp.
+
+        Args:
+            since: Return segments after this timestamp
+            limit: Maximum number of results
+            agent: Filter by agent name
+
+        Returns:
+            List of SearchResult objects, sorted by timestamp descending
+        """
+        sql = """
+            SELECT
+                path,
+                title,
+                date,
+                agent,
+                machine,
+                first_timestamp,
+                last_timestamp,
+                entities,
+                keywords
+            FROM segments
+            WHERE first_timestamp >= ?
+        """
+        params = [since.isoformat()]
+
+        if agent:
+            sql += " AND agent = ?"
+            params.append(agent)
+
+        sql += " ORDER BY first_timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        results = []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                cursor = conn.execute(sql, params)
+                for row in cursor:
+                    # Combine entities and keywords for snippet
+                    snippet_parts = []
+                    if row['entities']:
+                        snippet_parts.append(row['entities'])
+                    if row['keywords']:
+                        snippet_parts.append(row['keywords'])
+                    snippet = ' | '.join(snippet_parts)[:200]
+
+                    results.append(SearchResult(
+                        path=row['path'],
+                        title=row['title'],
+                        score=100.0,
+                        date=row['date'],
+                        agent=row['agent'],
+                        machine=row['machine'],
+                        first_timestamp=row['first_timestamp'],
+                        last_timestamp=row['last_timestamp'],
+                        snippet=snippet,
+                    ))
+            except sqlite3.OperationalError:
+                pass
+
+        return results
+
     def rebuild(self, workspace_dir: Optional[Path] = None) -> int:
         """Rebuild the entire index from segment files.
 

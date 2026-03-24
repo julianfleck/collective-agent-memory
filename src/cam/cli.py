@@ -163,42 +163,6 @@ def get_sync_repo() -> Optional[str]:
     return get_env("SYNC_REPO") or None
 
 
-def ensure_qmd_collection(workspace_dir: Path) -> bool:
-    """Ensure qmd collection is properly set up for the workspace.
-
-    Returns True if collection was set up, False if qmd not available.
-    """
-    if not shutil.which("qmd"):
-        return False
-
-    # Check if collection exists and has files
-    result = subprocess.run(
-        ["qmd", "collection", "list"],
-        capture_output=True,
-        text=True
-    )
-
-    # Look for "sessions" collection with 0 files or missing
-    needs_setup = True
-    if result.returncode == 0:
-        lines = result.stdout.split('\n')
-        for i, line in enumerate(lines):
-            if 'sessions' in line and 'qmd://sessions' in line:
-                # Check next line for file count
-                if i + 1 < len(lines) and 'Files:' in lines[i + 1]:
-                    file_count = lines[i + 1].split('Files:')[1].strip().split()[0]
-                    if file_count != '0':
-                        needs_setup = False
-                break
-
-    if needs_setup:
-        subprocess.run(["qmd", "collection", "remove", "sessions"], capture_output=True)
-        subprocess.run(["qmd", "collection", "add", str(workspace_dir), "--name", "sessions"], capture_output=True)
-        return True
-
-    return False
-
-
 def find_session_files(sessions_dir: Path, include_subagents: bool = True) -> List[Path]:
     """Find all session JSONL files in the given directory."""
     if not sessions_dir.exists():
@@ -274,269 +238,6 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[t
             query_parts.append(arg)
 
     return ' '.join(query_parts), agent, time_delta
-
-
-# =============================================================================
-# Result Filtering
-# =============================================================================
-
-def qmd_path_to_local(qmd_path: str, workspace_dir: Path) -> Path:
-    """Convert qmd:// URI to local filesystem path.
-
-    qmd://sessions/claude-wintermute/2026-02-27/file.md
-    → ~/.cam/sessions/claude@wintermute/2026-02-27/file.md
-
-    Note: qmd replaces @ with - in URIs, so we need to convert back.
-    """
-    # Remove qmd://sessions/ prefix
-    path = qmd_path.replace('qmd://sessions/', '')
-
-    # Handle agent-machine format: claude-wintermute → claude@wintermute
-    parts = path.split('/')
-    if len(parts) >= 1 and '-' in parts[0] and not parts[0].startswith('20'):
-        # Looks like agent-machine, not a date directory
-        agent_machine = parts[0]
-        # Try each hyphen position to find existing directory with @
-        for i in range(len(agent_machine)):
-            if agent_machine[i] == '-':
-                candidate = agent_machine[:i] + '@' + agent_machine[i+1:]
-                if (workspace_dir / candidate).exists():
-                    parts[0] = candidate
-                    break
-
-    return workspace_dir / '/'.join(parts)
-
-
-def filter_search_results(
-    results: list,
-    workspace_dir: Path,
-    agent_filter: Optional[str] = None,
-    time_filter: Optional[timedelta] = None
-) -> list:
-    """Filter qmd results by agent and/or time.
-
-    Args:
-        results: List of qmd result dicts with 'file' key
-        workspace_dir: Path to CAM workspace (e.g., ~/.cam/sessions)
-        agent_filter: Agent name to filter by (e.g., 'claude')
-        time_filter: Only include results newer than this timedelta
-
-    Returns:
-        Filtered list of results
-    """
-    if not agent_filter and not time_filter:
-        return results
-
-    now = datetime.now(timezone.utc)
-    cutoff = now - time_filter if time_filter else None
-    filtered = []
-
-    for result in results:
-        qmd_path = result.get('file', '')
-
-        # Agent filter: check path
-        if agent_filter:
-            # Path format: qmd://sessions/{agent}-{machine}/{date}/{file}
-            path_part = qmd_path.replace('qmd://sessions/', '')
-            parts = path_part.split('/')
-            if len(parts) >= 1:
-                agent_machine = parts[0]
-                # Agent is before first hyphen (or @)
-                result_agent = agent_machine.split('-')[0].split('@')[0]
-                if result_agent != agent_filter:
-                    continue
-
-        # Time filter: read frontmatter
-        if time_filter:
-            local_path = qmd_path_to_local(qmd_path, workspace_dir)
-            try:
-                segment_time = None
-
-                if local_path.exists():
-                    with open(local_path) as f:
-                        content = f.read()
-                        # Parse YAML frontmatter
-                        if content.startswith('---'):
-                            end = content.find('---', 3)
-                            if end > 0:
-                                frontmatter = yaml.safe_load(content[3:end])
-
-                                # Try last_timestamp first, then first_timestamp
-                                last_ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
-                                if last_ts:
-                                    # Handle both string and datetime objects (YAML can parse datetimes)
-                                    if isinstance(last_ts, datetime):
-                                        segment_time = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=timezone.utc)
-                                    elif isinstance(last_ts, str):
-                                        segment_time = datetime.fromisoformat(last_ts.replace('Z', '+00:00'))
-
-                                # Fall back to date field if no timestamp
-                                if not segment_time and frontmatter.get('date'):
-                                    date_val = frontmatter['date']
-                                    # Handle both string and date objects
-                                    from datetime import date as date_type
-                                    if isinstance(date_val, date_type):
-                                        # Convert date to datetime at end of day UTC
-                                        segment_time = datetime.combine(
-                                            date_val, datetime.max.time()
-                                        ).replace(tzinfo=timezone.utc)
-                                    elif isinstance(date_val, str):
-                                        # Parse YYYY-MM-DD format, assume end of day UTC
-                                        segment_time = datetime.strptime(date_val, '%Y-%m-%d').replace(
-                                            hour=23, minute=59, second=59, tzinfo=timezone.utc
-                                        )
-
-                # If no frontmatter timestamp, try to extract date from path
-                if not segment_time:
-                    # Path format: qmd://sessions/{agent}-{machine}/{date}/{file}
-                    path_part = qmd_path.replace('qmd://sessions/', '')
-                    parts = path_part.split('/')
-                    if len(parts) >= 2:
-                        date_str = parts[1] if parts[1].startswith('20') else (parts[0] if parts[0].startswith('20') else None)
-                        if date_str:
-                            try:
-                                segment_time = datetime.strptime(date_str, '%Y-%m-%d').replace(
-                                    hour=23, minute=59, second=59, tzinfo=timezone.utc
-                                )
-                            except ValueError:
-                                pass
-
-                # Filter by time
-                if segment_time and segment_time < cutoff:
-                    continue
-
-            except Exception:
-                # If we can't read the file or parse time, skip it
-                continue
-
-        filtered.append(result)
-
-    return filtered
-
-
-def format_results_for_json(results: list, workspace_dir: Path = None) -> list:
-    """Transform results into clean JSON format with useful fields.
-
-    Transforms qmd's raw output into a more usable format:
-    - path: clean relative path (agent@machine/date/file.md)
-    - date: extracted date (YYYY-MM-DD)
-    - timestamp: last_timestamp from frontmatter (ISO format)
-    - agent: agent name
-    - machine: machine name
-    - title: section title
-    - score: relevance score
-    """
-    if workspace_dir is None:
-        workspace_dir = get_workspace_dir()
-
-    formatted = []
-    for result in results:
-        qmd_path = result.get('file', '')
-        # Clean path: qmd://sessions/claude-wintermute/... -> claude@wintermute/...
-        path = qmd_path.replace('qmd://sessions/', '')
-        # Fix the agent-machine separator (qmd uses - but we use @)
-        parts = path.split('/')
-        if len(parts) >= 2:
-            # First part is agent-machine, convert to agent@machine
-            agent_machine = parts[0]
-            if '-' in agent_machine and '@' not in agent_machine:
-                # Split on first hyphen only (machine might have hyphens)
-                idx = agent_machine.index('-')
-                agent = agent_machine[:idx]
-                machine = agent_machine[idx+1:]
-                parts[0] = f"{agent}@{machine}"
-                path = '/'.join(parts)
-
-        # Extract fields from path
-        agent = machine = date = ""
-        if len(parts) >= 2:
-            agent_machine = parts[0]
-            if '@' in agent_machine:
-                agent, machine = agent_machine.split('@', 1)
-            date = parts[1] if len(parts) > 1 else ""
-
-        # Read timestamp from frontmatter
-        timestamp = ""
-        local_path = qmd_path_to_local(qmd_path, workspace_dir)
-        try:
-            if local_path.exists():
-                with open(local_path) as f:
-                    content = f.read(3000)  # Read enough for frontmatter
-                    if content.startswith('---'):
-                        end = content.find('---', 3)
-                        if end > 0:
-                            frontmatter = yaml.safe_load(content[3:end])
-                            # Prefer last_timestamp, fall back to first_timestamp
-                            ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
-                            if ts:
-                                # Ensure it's a string (might be datetime from yaml)
-                                timestamp = str(ts) if not isinstance(ts, str) else ts
-        except Exception:
-            pass
-
-        formatted.append({
-            "path": path,
-            "date": date,
-            "timestamp": timestamp,
-            "agent": agent,
-            "machine": machine,
-            "title": result.get('title', ''),
-            "score": result.get('score', 0),
-        })
-
-    return formatted
-
-
-def display_results(results: list, workspace_dir: Path = None) -> None:
-    """Display filtered results with dates."""
-    if workspace_dir is None:
-        workspace_dir = get_workspace_dir()
-
-    for r in results:
-        filepath = r.get('file', '').replace('qmd://sessions/', '')
-        score = r.get('score', 0)
-        title = r.get('title', '')
-        docid = r.get('docid', '')
-
-        # Extract date from path or read from file
-        date_str = ""
-        parts = filepath.split('/')
-        if len(parts) >= 2:
-            # Path format: agent-machine/YYYY-MM-DD/file.md
-            for part in parts:
-                if part.startswith('20') and len(part) == 10:
-                    date_str = part
-                    break
-
-        # Try to get timestamp from file for more precision
-        timestamp_str = ""
-        local_path = qmd_path_to_local(r.get('file', ''), workspace_dir)
-        if local_path.exists():
-            try:
-                with open(local_path) as f:
-                    content = f.read(3000)  # Frontmatter can be long with entities
-                    if content.startswith('---'):
-                        end = content.find('---', 3)
-                        if end > 0:
-                            frontmatter = yaml.safe_load(content[3:end])
-                            ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
-                            if ts:
-                                if isinstance(ts, datetime):
-                                    timestamp_str = ts.strftime("%Y-%m-%d %H:%M")
-                                elif isinstance(ts, str):
-                                    # Parse and format
-                                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                pass
-
-        # Use timestamp if available, otherwise date from path
-        display_date = timestamp_str or date_str
-
-        # Format output
-        console.print(f"[cyan]{display_date}[/cyan] [bold]{title}[/bold]")
-        console.print(f"  [dim]{filepath}[/dim]  [green]{score:.0%}[/green]")
-        console.print()
 
 
 # =============================================================================
@@ -631,87 +332,6 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
     return 0
 
 
-def _run_qmd_search(query: str, mode: str, collection: str = "sessions",
-                    limit: int = None, json_output: bool = False,
-                    files_output: bool = False,
-                    agent_filter: str = None,
-                    time_filter: timedelta = None) -> int:
-    """Run qmd search with specified mode and optional filtering."""
-    if not shutil.which("qmd"):
-        print("Error: qmd is not installed.", file=sys.stderr)
-        print("Install with: npm install -g @tobilu/qmd", file=sys.stderr)
-        return 1
-
-    # Check if we need to filter results
-    needs_filtering = agent_filter or time_filter
-
-    # mode: "search" (keyword), "vsearch" (semantic), "query" (hybrid)
-    cmd = ["qmd", mode, query, "-c", collection]
-
-    if limit:
-        # Overfetch when filtering to ensure we get enough results after filtering
-        fetch_limit = limit * 3 if needs_filtering else limit
-        cmd.extend(["-n", str(fetch_limit)])
-
-    # Force JSON output when filtering so we can process results
-    if json_output or needs_filtering:
-        cmd.append("--json")
-    if files_output and not needs_filtering:
-        cmd.append("--files")
-
-    try:
-        if needs_filtering:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(result.stderr, file=sys.stderr)
-                return result.returncode
-
-            # qmd returns JSON array directly
-            try:
-                results = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                print("Error: Failed to parse qmd output", file=sys.stderr)
-                return 1
-
-            # Apply filters
-            filtered = filter_search_results(
-                results, get_workspace_dir(),
-                agent_filter, time_filter
-            )
-
-            # Apply limit after filtering
-            if limit:
-                filtered = filtered[:limit]
-
-            # Output in requested format
-            if json_output:
-                formatted = format_results_for_json(filtered, get_workspace_dir())
-                print(json.dumps(formatted, indent=2))
-            elif files_output:
-                for r in filtered:
-                    path = r.get('file', '').replace('qmd://sessions/', '')
-                    # Fix agent-machine separator
-                    parts = path.split('/')
-                    if parts and '-' in parts[0] and '@' not in parts[0]:
-                        idx = parts[0].index('-')
-                        parts[0] = parts[0][:idx] + '@' + parts[0][idx+1:]
-                        path = '/'.join(parts)
-                    print(path)
-            else:
-                if filtered:
-                    display_results(filtered)
-                else:
-                    console.print("[dim]No results found matching filters[/dim]")
-
-            return 0
-        else:
-            result = subprocess.run(cmd)
-            return result.returncode
-
-    except KeyboardInterrupt:
-        return 130
-
-
 def cmd_search(args: argparse.Namespace) -> int:
     """Keyword search (fast)."""
     query = args.query
@@ -762,77 +382,59 @@ def cmd_recent_with_filter(
 ) -> int:
     """List recent segments matching time/agent filter (no search query)."""
     workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
     now = datetime.now(timezone.utc)
-    cutoff = now - time_filter
+    since = now - time_filter
 
-    results = []
+    # Check if index exists
+    if not index_path.exists():
+        console.print("[yellow]Search index not found. Building index...[/yellow]")
+        index = SearchIndex(index_path, workspace_dir)
+        count = index.rebuild(workspace_dir)
+        console.print(f"[green]Indexed {count} segments[/green]")
+    else:
+        index = SearchIndex(index_path, workspace_dir)
 
-    # Scan workspace for matching files
-    for agent_dir in workspace_dir.iterdir():
-        if not agent_dir.is_dir() or agent_dir.name.startswith('.'):
-            continue
+    # List recent segments
+    results = index.list_recent(since=since, limit=limit, agent=agent_filter)
 
-        # Agent filter
-        if agent_filter:
-            agent_name = agent_dir.name.split('@')[0]
-            if agent_name != agent_filter:
-                continue
-
-        for date_dir in agent_dir.iterdir():
-            if not date_dir.is_dir():
-                continue
-
-            for segment_file in date_dir.glob("*.md"):
-                try:
-                    with open(segment_file) as f:
-                        content = f.read(3000)  # Frontmatter can be long with entities
-                        if not content.startswith('---'):
-                            continue
-                        end = content.find('---', 3)
-                        if end <= 0:
-                            continue
-                        frontmatter = yaml.safe_load(content[3:end])
-
-                        # Get timestamp
-                        ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
-                        if ts:
-                            if isinstance(ts, datetime):
-                                segment_time = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                            elif isinstance(ts, str):
-                                segment_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                            else:
-                                continue
-
-                            if segment_time >= cutoff:
-                                results.append({
-                                    'file': f"qmd://sessions/{segment_file.relative_to(workspace_dir)}",
-                                    'title': frontmatter.get('title', segment_file.stem),
-                                    'timestamp': segment_time,
-                                    'score': 1.0
-                                })
-                except Exception:
-                    continue
-
-    # Sort by timestamp (most recent first)
-    results.sort(key=lambda x: x['timestamp'], reverse=True)
-
-    # Apply limit
-    results = results[:limit]
+    if not results:
+        console.print("[dim]No segments found in time range[/dim]")
+        return 0
 
     # Output
     if json_output:
-        # Convert datetime to string for JSON
+        formatted = []
         for r in results:
-            r['timestamp'] = r['timestamp'].isoformat()
-        print(json.dumps(results, indent=2))
+            formatted.append({
+                "path": r.path,
+                "title": r.title,
+                "date": r.date,
+                "timestamp": r.first_timestamp or "",
+                "agent": r.agent,
+                "machine": r.machine,
+                "snippet": r.snippet or "",
+            })
+        print(json.dumps(formatted, indent=2))
     elif files_output:
         for r in results:
-            print(r['file'].replace('qmd://sessions/', ''))
+            print(r.path)
     else:
-        if results:
-            display_results(results, workspace_dir)
-        else:
-            console.print("[dim]No segments found in time range[/dim]")
+        for r in results:
+            # Format timestamp for display
+            display_date = r.date
+            if r.first_timestamp:
+                try:
+                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
+                    display_date = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
+            console.print(f"  [dim]{r.path}[/dim]")
+            if r.snippet:
+                console.print(f"  [italic]{r.snippet[:150]}[/italic]")
+            console.print()
 
     return 0
 
@@ -1405,12 +1007,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_recent(args: argparse.Namespace) -> int:
-    """List recent session segments by timestamp (no qmd required)."""
+    """List recent session segments by timestamp."""
     workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
 
-    if not workspace_dir.exists():
-        console.print("[yellow]No session segments found. Run 'cam index' first.[/yellow]")
-        return 1
+    # Check if index exists
+    if not index_path.exists():
+        console.print("[yellow]Search index not found. Building index...[/yellow]")
+        index = SearchIndex(index_path, workspace_dir)
+        count = index.rebuild(workspace_dir)
+        console.print(f"[green]Indexed {count} segments[/green]")
+    else:
+        index = SearchIndex(index_path, workspace_dir)
 
     # Parse time filter
     time_filter = None
@@ -1426,119 +1034,63 @@ def cmd_recent(args: argparse.Namespace) -> int:
         time_filter = timedelta(hours=24)
 
     now = datetime.now(timezone.utc)
-    cutoff = now - time_filter
+    since = now - time_filter
 
-    # Agent filter
-    agent_filter = getattr(args, 'agent', None)
+    # Get limit
+    limit = getattr(args, 'limit', None) or 20
 
-    # Scan all segments
-    matches = []
-    for segment_file in workspace_dir.glob("**/*.md"):
-        try:
-            content = segment_file.read_text()
-            if not content.startswith("---"):
-                continue
+    # List recent segments
+    results = index.list_recent(
+        since=since,
+        limit=limit,
+        agent=getattr(args, 'agent', None),
+    )
 
-            # Parse frontmatter
-            end = content.find("---", 3)
-            if end < 0:
-                continue
-
-            frontmatter = yaml.safe_load(content[3:end])
-
-            # Agent filter
-            if agent_filter:
-                segment_agent = frontmatter.get("agent", "")
-                if segment_agent != agent_filter:
-                    continue
-
-            # Get timestamp
-            segment_time = None
-            last_ts = frontmatter.get('last_timestamp') or frontmatter.get('first_timestamp')
-            if last_ts:
-                if isinstance(last_ts, datetime):
-                    segment_time = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=timezone.utc)
-                elif isinstance(last_ts, str):
-                    segment_time = datetime.fromisoformat(last_ts.replace('Z', '+00:00'))
-
-            # Fall back to file mtime (most accurate for recent files)
-            if not segment_time:
-                mtime = segment_file.stat().st_mtime
-                segment_time = datetime.fromtimestamp(mtime, tz=timezone.utc)
-
-            if segment_time < cutoff:
-                continue
-
-            # Extract key entities for display
-            entities = frontmatter.get("entities", {})
-            # Prioritize meaningful entity types
-            key_entities = []
-            for etype in ["tool", "file", "technology", "concept", "command", "product"]:
-                if etype in entities:
-                    key_entities.extend(entities[etype][:3])  # Max 3 per type
-                if len(key_entities) >= 6:
-                    break
-
-            matches.append({
-                "file": str(segment_file.relative_to(workspace_dir)),
-                "title": frontmatter.get("title", ""),
-                "keywords": frontmatter.get("keywords", [])[:4],
-                "entities": key_entities[:6],
-                "timestamp": segment_time.isoformat(),
-                "agent": frontmatter.get("agent", ""),
-                "machine": frontmatter.get("machine", ""),
-            })
-
-        except Exception:
-            continue
-
-    if not matches:
-        # Format time nicely
-        time_str = args.time if args.time else "24h"
-        # Convert seconds format back to human readable
-        if time_str.endswith('s') and time_str[:-1].isdigit():
-            secs = int(time_str[:-1])
-            if secs >= 86400:
-                time_str = f"{secs // 86400}d"
-            elif secs >= 3600:
-                time_str = f"{secs // 3600}h"
-            elif secs >= 60:
-                time_str = f"{secs // 60}min"
+    if not results:
+        time_str = args.time if hasattr(args, 'time') and args.time else "24h"
         console.print(f"[dim]No session segments found in the last {time_str}[/dim]")
         return 0
 
-    # Sort by timestamp descending (most recent first)
-    matches.sort(key=lambda x: x["timestamp"], reverse=True)
-
-    # Apply limit
-    limit = getattr(args, 'limit', None) or 20
-    matches = matches[:limit]
-
     # Output format
     if getattr(args, 'json', False):
-        print(json.dumps(matches, indent=2))
+        formatted = []
+        for r in results:
+            formatted.append({
+                "path": r.path,
+                "title": r.title,
+                "date": r.date,
+                "timestamp": r.first_timestamp or "",
+                "agent": r.agent,
+                "machine": r.machine,
+                "snippet": r.snippet or "",
+            })
+        print(json.dumps(formatted, indent=2))
     elif getattr(args, 'files', False):
-        for m in matches:
-            print(m["file"])
+        for r in results:
+            print(r.path)
     else:
-        for m in matches:
-            # Parse timestamp for relative display
-            ts = datetime.fromisoformat(m['timestamp'])
-            age = now - ts
-            if age.total_seconds() < 3600:
-                age_str = f"{int(age.total_seconds() / 60)}m ago"
-            elif age.total_seconds() < 86400:
-                age_str = f"{int(age.total_seconds() / 3600)}h ago"
-            else:
-                age_str = f"{int(age.total_seconds() / 86400)}d ago"
+        for r in results:
+            # Calculate relative time
+            age_str = ""
+            if r.first_timestamp:
+                try:
+                    ts = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
+                    age = now - ts
+                    if age.total_seconds() < 3600:
+                        age_str = f"{int(age.total_seconds() / 60)}m ago"
+                    elif age.total_seconds() < 86400:
+                        age_str = f"{int(age.total_seconds() / 3600)}h ago"
+                    else:
+                        age_str = f"{int(age.total_seconds() / 86400)}d ago"
+                except Exception:
+                    pass
 
-            console.print(f"[bold]{m['file']}[/bold] [dim]({age_str})[/dim]")
-
-            # Show entities if available, otherwise fall back to keywords
-            if m.get('entities'):
-                console.print(f"  [cyan]{', '.join(m['entities'])}[/cyan]")
-            elif m.get('keywords'):
-                console.print(f"  [dim]{', '.join(m['keywords'])}[/dim]")
+            console.print(f"[cyan]{r.date}[/cyan] [bold]{r.title}[/bold] [dim]({age_str})[/dim]")
+            console.print(f"  [dim]{r.path}[/dim]")
+            if r.snippet:
+                # Show entities/keywords
+                console.print(f"  [italic]{r.snippet[:150]}[/italic]")
+            console.print()
 
     return 0
 
@@ -1584,70 +1136,63 @@ def cmd_get(args: argparse.Namespace) -> int:
 def cmd_entity(args: argparse.Namespace) -> int:
     """Search session segments by entity name."""
     workspace_dir = get_workspace_dir()
-    entity_name = args.entity.lower()
+    index_path = workspace_dir.parent / "index.sqlite"
+    entity_name = args.entity
     limit = args.limit or 10
 
-    if not workspace_dir.exists():
-        console.print("[yellow]No session segments found. Run 'cam index' first.[/yellow]")
-        return 1
+    # Check if index exists
+    if not index_path.exists():
+        console.print("[yellow]Search index not found. Building index...[/yellow]")
+        index = SearchIndex(index_path, workspace_dir)
+        count = index.rebuild(workspace_dir)
+        console.print(f"[green]Indexed {count} segments[/green]")
+    else:
+        index = SearchIndex(index_path, workspace_dir)
 
-    # Search all segment files for matching entities
-    matches = []
-    for segment_file in workspace_dir.glob("**/*.md"):
-        try:
-            content = segment_file.read_text()
-            if not content.startswith("---"):
-                continue
+    # Search by entity
+    results = index.search_entities(
+        entity_name=entity_name,
+        limit=limit,
+        agent=getattr(args, 'agent', None),
+    )
 
-            # Parse frontmatter
-            end = content.find("---", 3)
-            if end < 0:
-                continue
-
-            frontmatter = yaml.safe_load(content[3:end])
-            entities = frontmatter.get("entities", {})
-
-            # Search entity values
-            for etype, elist in entities.items():
-                for entity in elist:
-                    if entity_name in entity.lower():
-                        matches.append({
-                            "file": str(segment_file.relative_to(workspace_dir)),
-                            "title": frontmatter.get("title", ""),
-                            "date": str(frontmatter.get("date", "")),
-                            "entity_type": etype,
-                            "entity": entity,
-                            "agent": frontmatter.get("agent", ""),
-                            "machine": frontmatter.get("machine", ""),
-                        })
-                        break  # Only match once per segment
-                else:
-                    continue
-                break  # Only match once per segment
-
-        except Exception:
-            continue
-
-    if not matches:
-        console.print(f"[dim]No session segments found with entity matching '{entity_name}'[/dim]")
+    if not results:
+        console.print(f"[dim]No segments found with entity matching '{entity_name}'[/dim]")
         return 0
-
-    # Sort by date descending
-    matches.sort(key=lambda x: x["date"], reverse=True)
-    matches = matches[:limit]
 
     # Output format
     if args.json:
-        print(json.dumps(matches, indent=2))
+        formatted = []
+        for r in results:
+            formatted.append({
+                "path": r.path,
+                "date": r.date,
+                "timestamp": r.first_timestamp or "",
+                "agent": r.agent,
+                "machine": r.machine,
+                "title": r.title,
+                "entities": r.snippet or "",
+            })
+        print(json.dumps(formatted, indent=2))
     elif args.files:
-        for m in matches:
-            print(m["file"])
+        for r in results:
+            print(r.path)
     else:
-        for m in matches:
-            console.print(f"[bold]{m['file']}[/bold]")
-            console.print(f"  Title: {m['title']}")
-            console.print(f"  Entity: [green]{m['entity']}[/green] ({m['entity_type']})")
-            console.print(f"  Date: {m['date']} | Agent: {m['agent']}@{m['machine']}")
+        for r in results:
+            # Format timestamp for display
+            display_date = r.date
+            if r.first_timestamp:
+                try:
+                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
+                    display_date = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
+            console.print(f"  [dim]{r.path}[/dim]")
+            if r.snippet:
+                # Show matching entities
+                console.print(f"  [green]Entities:[/green] {r.snippet[:150]}")
             console.print()
 
     return 0
