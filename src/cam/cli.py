@@ -573,6 +573,126 @@ def cmd_search(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_query(args: argparse.Namespace) -> int:
+    """Answer a question using agentic search over session memory.
+
+    1. Extract keywords from the question
+    2. Search for relevant segments
+    3. Read segment content
+    4. Synthesize an answer using local LLM
+    """
+    query = args.query
+    verbose = getattr(args, 'verbose', False)
+    limit = getattr(args, 'limit', 5)
+
+    if not query:
+        print("Error: query required", file=sys.stderr)
+        return 1
+
+    # Check if Ollama is available
+    from cam.expand import _find_model, _call_ollama
+    model = _find_model()
+    if not model:
+        print("Error: cam query requires Ollama. Install from https://ollama.com/", file=sys.stderr)
+        return 1
+
+    if verbose:
+        console.print(f"[dim]Using model: {model}[/dim]")
+
+    # Step 1: Extract keywords
+    if verbose:
+        console.print("[dim]Extracting keywords...[/dim]")
+
+    from cam.expand import _extract_keywords
+    keywords = _extract_keywords(query)
+
+    if verbose:
+        console.print(f"[dim]Keywords: {', '.join(keywords)}[/dim]")
+
+    # Step 2: Search for relevant segments
+    workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
+
+    if not index_path.exists():
+        print("Error: Search index not found. Run 'cam reindex' first.", file=sys.stderr)
+        return 1
+
+    index = SearchIndex(index_path, workspace_dir)
+
+    # Search with extracted keywords
+    search_query = ' '.join(keywords)
+    results = index.search(
+        query=search_query,
+        limit=limit,
+        fast=True,  # Keywords already extracted
+    )
+
+    if not results:
+        console.print("[yellow]No relevant segments found.[/yellow]")
+        return 0
+
+    if verbose:
+        console.print(f"[dim]Found {len(results)} relevant segments[/dim]")
+        for r in results:
+            console.print(f"[dim]  - {r.path} (score: {r.score:.0f}%)[/dim]")
+
+    # Step 3: Read segment content
+    if verbose:
+        console.print("[dim]Reading segment content...[/dim]")
+
+    context_parts = []
+    for r in results[:3]:  # Top 3 segments for context
+        segment_path = workspace_dir / r.path
+        if segment_path.exists():
+            try:
+                content = segment_path.read_text()
+                # Extract body (skip frontmatter)
+                if '---' in content:
+                    parts = content.split('---', 2)
+                    if len(parts) >= 3:
+                        body = parts[2].strip()
+                    else:
+                        body = content
+                else:
+                    body = content
+                # Truncate if too long
+                if len(body) > 3000:
+                    body = body[:3000] + "..."
+                context_parts.append(f"## {r.title or r.path}\n{body}")
+            except Exception:
+                pass
+
+    if not context_parts:
+        console.print("[yellow]Could not read segment content.[/yellow]")
+        return 0
+
+    context = "\n\n---\n\n".join(context_parts)
+
+    # Step 4: Synthesize answer
+    if verbose:
+        console.print("[dim]Synthesizing answer...[/dim]\n")
+
+    prompt = f"""Based on the following session segments, answer the query concisely.
+If the answer is not in the segments, say so.
+
+Query: {query}
+
+Relevant segments:
+{context}
+
+Answer:"""
+
+    answer = _call_ollama(prompt, timeout=60)
+
+    if answer:
+        console.print(answer)
+    else:
+        console.print("[red]Failed to generate answer.[/red]")
+        return 1
+
+    return 0
+
+
 def cmd_recent_with_filter(
     time_filter: timedelta,
     agent_filter: Optional[str],
@@ -1464,6 +1584,11 @@ Speed:   --fast (skip query expansion for faster search)
     p_search = subparsers.add_parser("search", help="Keyword search")
     add_search_args(p_search)
 
+    p_query = subparsers.add_parser("query", help="Answer questions using session memory")
+    p_query.add_argument("query", help="Question to answer")
+    p_query.add_argument("-n", "--limit", type=int, default=5, help="Number of segments to search")
+    p_query.add_argument("--verbose", action="store_true", help="Show search steps")
+
     p_entity = subparsers.add_parser("entity", help="Search by entity")
     p_entity.add_argument("entity", help="Entity name to search for")
     p_entity.add_argument("-n", "--limit", type=int, default=10, help="Number of results")
@@ -1536,7 +1661,7 @@ Speed:   --fast (skip query expansion for faster search)
 
     # Handle bare search query with inline filters
     # e.g., cam "query" [2h] @claude or cam [15min] or cam -t 30min
-    known_cmds = {"search", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
+    known_cmds = {"search", "query", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
 
     # Handle cam -t TIME (shorthand for cam recent -t TIME)
     if argv and argv[0] in ("-t", "--time") and len(argv) >= 2:
@@ -1582,6 +1707,8 @@ Speed:   --fast (skip query expansion for faster search)
     # Dispatch
     if args.command == "search":
         return cmd_search(args)
+    elif args.command == "query":
+        return cmd_query(args)
     elif args.command == "segment":
         return cmd_segment(args)
     elif args.command == "index":
