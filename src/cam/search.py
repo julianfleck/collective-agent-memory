@@ -23,6 +23,8 @@ class SearchResult:
     first_timestamp: Optional[str] = None
     last_timestamp: Optional[str] = None
     snippet: Optional[str] = None  # Text snippet with match context
+    keywords: Optional[str] = None  # Space-separated keywords
+    entities: Optional[str] = None  # Space-separated entities
 
 
 @dataclass
@@ -245,6 +247,7 @@ class SearchIndex:
         query: str,
         limit: int = 10,
         agent: Optional[str] = None,
+        machine: Optional[str] = None,
         since: Optional[datetime] = None,
         min_score: float = 20.0,
         dynamic_cutoff: bool = True,
@@ -265,6 +268,7 @@ class SearchIndex:
             query: Search query (FTS5 syntax supported)
             limit: Maximum number of results
             agent: Filter by agent name (e.g., 'claude', 'cursor')
+            machine: Filter by machine name (e.g., 'wintermute', 'data')
             since: Filter to segments after this timestamp
             min_score: Minimum score threshold (0-100)
             dynamic_cutoff: Apply dynamic cutoff based on score drops
@@ -277,12 +281,12 @@ class SearchIndex:
         snippet_tokens = max(5, min(64, snippet_tokens))
 
         # Try AND query first (precise)
-        results = self._search_fts(query, limit, agent, since, use_or=False,
+        results = self._search_fts(query, limit, agent, machine, since, use_or=False,
                                    snippet_tokens=snippet_tokens)
 
         # If too few results, try OR query (broad)
         if len(results) < 3:
-            or_results = self._search_fts(query, limit, agent, since, use_or=True,
+            or_results = self._search_fts(query, limit, agent, machine, since, use_or=True,
                                           snippet_tokens=snippet_tokens)
             # Merge results, preferring AND matches
             seen = {r.path for r in results}
@@ -342,6 +346,7 @@ class SearchIndex:
         query: str,
         limit: int,
         agent: Optional[str],
+        machine: Optional[str],
         since: Optional[datetime],
         use_or: bool,
         snippet_tokens: int = 15,
@@ -365,6 +370,8 @@ class SearchIndex:
                 s.machine,
                 s.first_timestamp,
                 s.last_timestamp,
+                s.keywords,
+                s.entities,
                 snippet(segments_fts, 3, '', '', '...', {snippet_tokens}) as snippet
             FROM segments_fts
             JOIN segments s ON segments_fts.rowid = s.id
@@ -375,6 +382,10 @@ class SearchIndex:
         if agent:
             sql += " AND s.agent = ?"
             params.append(agent)
+
+        if machine:
+            sql += " AND s.machine = ?"
+            params.append(machine)
 
         if since:
             sql += " AND s.first_timestamp >= ?"
@@ -406,6 +417,8 @@ class SearchIndex:
                         first_timestamp=row['first_timestamp'],
                         last_timestamp=row['last_timestamp'],
                         snippet=row['snippet'],
+                        keywords=row['keywords'],
+                        entities=row['entities'],
                     ))
             except sqlite3.OperationalError:
                 # Query syntax error - try simpler approach
@@ -513,6 +526,7 @@ class SearchIndex:
         entity_name: str,
         limit: int = 10,
         agent: Optional[str] = None,
+        machine: Optional[str] = None,
         snippet_tokens: int = 15,
     ) -> List[SearchResult]:
         """Search segments by entity name.
@@ -523,6 +537,7 @@ class SearchIndex:
             entity_name: Entity name to search for (case-insensitive)
             limit: Maximum number of results
             agent: Filter by agent name
+            machine: Filter by machine name
             snippet_tokens: Number of tokens in snippet
 
         Returns:
@@ -541,6 +556,7 @@ class SearchIndex:
                 s.machine,
                 s.first_timestamp,
                 s.last_timestamp,
+                s.keywords,
                 s.entities,
                 snippet(segments_fts, 3, '', '', '...', {snippet_tokens}) as snippet
             FROM segments_fts
@@ -552,6 +568,10 @@ class SearchIndex:
         if agent:
             sql += " AND s.agent = ?"
             params.append(agent)
+
+        if machine:
+            sql += " AND s.machine = ?"
+            params.append(machine)
 
         sql += " ORDER BY s.first_timestamp DESC LIMIT ?"
         params.append(limit)
@@ -571,7 +591,9 @@ class SearchIndex:
                         machine=row['machine'],
                         first_timestamp=row['first_timestamp'],
                         last_timestamp=row['last_timestamp'],
-                        snippet=row['snippet'],  # Body snippet, not entities
+                        snippet=row['snippet'],
+                        keywords=row['keywords'],
+                        entities=row['entities'],
                     ))
             except sqlite3.OperationalError:
                 pass
@@ -583,6 +605,7 @@ class SearchIndex:
         since: datetime,
         limit: int = 20,
         agent: Optional[str] = None,
+        machine: Optional[str] = None,
     ) -> List[SearchResult]:
         """List recent segments by timestamp.
 
@@ -590,6 +613,7 @@ class SearchIndex:
             since: Return segments after this timestamp
             limit: Maximum number of results
             agent: Filter by agent name
+            machine: Filter by machine name
 
         Returns:
             List of SearchResult objects, sorted by timestamp descending
@@ -614,6 +638,10 @@ class SearchIndex:
             sql += " AND agent = ?"
             params.append(agent)
 
+        if machine:
+            sql += " AND machine = ?"
+            params.append(machine)
+
         sql += " ORDER BY first_timestamp DESC LIMIT ?"
         params.append(limit)
 
@@ -623,14 +651,6 @@ class SearchIndex:
             try:
                 cursor = conn.execute(sql, params)
                 for row in cursor:
-                    # Combine entities and keywords for snippet
-                    snippet_parts = []
-                    if row['entities']:
-                        snippet_parts.append(row['entities'])
-                    if row['keywords']:
-                        snippet_parts.append(row['keywords'])
-                    snippet = ' | '.join(snippet_parts)[:200]
-
                     results.append(SearchResult(
                         path=row['path'],
                         title=row['title'],
@@ -640,7 +660,9 @@ class SearchIndex:
                         machine=row['machine'],
                         first_timestamp=row['first_timestamp'],
                         last_timestamp=row['last_timestamp'],
-                        snippet=snippet,
+                        snippet=None,  # No body snippet for recent listing
+                        keywords=row['keywords'],
+                        entities=row['entities'],
                     ))
             except sqlite3.OperationalError:
                 pass

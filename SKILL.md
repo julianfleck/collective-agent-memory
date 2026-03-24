@@ -10,19 +10,13 @@ Search past sessions to find previous work, decisions, code patterns, or context
 ## Search Commands
 
 ```bash
-# Quick search (hybrid with reranking - best quality)
+# Quick search (SQLite FTS5 with weighted ranking)
 cam "authentication flow"
 cam "error handling" -t 2h             # with time filter
 cam "API design" -n 20                 # more results
 
-# Keyword search (fast, uses qmd)
+# Keyword search (explicit)
 cam search "authentication flow" -t 1d
-
-# Semantic search (vector similarity)
-cam vsearch "how to handle user login" -t 3d
-
-# Hybrid search with reranking (explicit)
-cam query "error handling patterns" -t 2h
 
 # Entity search (find by tool, file, concept)
 cam entity "docker"                    # sessions using Docker
@@ -37,7 +31,7 @@ cam recent                             # last 24 hours
 ## Filters
 
 ```bash
-# Time filter (-t)
+# Time filter (-t or --since)
 cam "auth" -t 15min                    # last 15 minutes
 cam "auth" -t 2h                       # last 2 hours
 cam "auth" -t 3d                       # last 3 days
@@ -47,8 +41,14 @@ cam "auth" -t 1w                       # last week
 cam "error" -a claude                  # Claude sessions only
 cam "error" -a cursor                  # Cursor sessions only
 
+# Machine filter (-m)
+cam "error" -m wintermute              # specific machine
+
+# Agent@machine filter (shorthand)
+cam openclaw@data "phase harmonics"   # filter by agent and machine
+
 # Combined
-cam "error handling" -t 2h -a claude -n 20
+cam "error handling" -t 2h -a claude -m wintermute -n 20
 
 # Output formats
 cam "database" --json                  # JSON output
@@ -60,6 +60,7 @@ cam "database" --files                 # file paths only
 ```bash
 cam status              # Show status (indexed sessions, segments)
 cam index               # Index new local sessions
+cam reindex             # Rebuild search index
 cam sync                # Sync with remote repo (if configured)
 cam logs -f             # Follow daemon logs
 cam update              # Update CAM to latest version
@@ -70,8 +71,11 @@ cam update              # Update CAM to latest version
 | Option | Description |
 |--------|-------------|
 | `-t TIME` | Time filter: `15min`, `2h`, `3d`, `1w` |
+| `--since TIME` | Alias for `-t` |
 | `-a AGENT` | Agent filter: `claude`, `cursor`, `openclaw` |
+| `-m MACHINE` | Machine filter: `wintermute`, `data`, etc. |
 | `-n N` | Number of results (default: 10) |
+| `-s N` | Snippet length in tokens (5-64, default: 15) |
 | `--json` | JSON output for scripting |
 | `--files` | File paths only |
 
@@ -91,7 +95,10 @@ Returns:
     "agent": "claude",
     "machine": "wintermute",
     "title": "Section 3: Api Design",
-    "score": 0.85
+    "keywords": ["api", "design", "rest", "endpoints"],
+    "entities": ["FastAPI", "OpenAPI", "REST"],
+    "snippet": "...designing the REST API endpoints using FastAPI...",
+    "score": 85.5
   }
 ]
 ```

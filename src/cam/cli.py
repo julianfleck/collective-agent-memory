@@ -35,9 +35,96 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from cam.search import SearchIndex
+from cam.search import SearchIndex, SearchResult
 
 console = Console()
+
+
+# =============================================================================
+# Unified Output Formatting
+# =============================================================================
+
+def format_result(result: SearchResult, show_score: bool = False, workspace_dir: Path = None) -> None:
+    """Format and display a single search result with consistent structure.
+
+    Output format:
+    - Separator
+    - Segment: full path
+    - Date: YYYY-MM-DD HH:MM
+    - Agent: agent@machine
+    - Tags: #tag1 #tag2 ...
+    - Entities: entity1 entity2 ...
+    - Preview: snippet
+    - Separator
+    """
+    if workspace_dir is None:
+        workspace_dir = get_workspace_dir()
+
+    # Full path
+    full_path = workspace_dir / result.path
+
+    # Date/time
+    display_datetime = result.date
+    if result.first_timestamp:
+        try:
+            dt = datetime.fromisoformat(result.first_timestamp.replace('Z', '+00:00'))
+            display_datetime = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    # Agent@machine
+    agent_machine = f"{result.agent}@{result.machine}" if result.machine else result.agent
+
+    # Tags (keywords) - max 7
+    tags = []
+    if result.keywords:
+        tags = result.keywords.split()[:7]
+    tags_str = " ".join(f"#{t}" for t in tags) if tags else "-"
+
+    # Entities - max 5 (no # prefix)
+    entities = []
+    if result.entities:
+        entities = result.entities.split()[:5]
+    entities_str = " ".join(entities) if entities else "-"
+
+    # Snippet
+    snippet = ""
+    if result.snippet:
+        snippet = ' '.join(result.snippet.split())[:200]
+
+    # Print formatted output
+    console.print("[dim]" + "-" * 60 + "[/dim]")
+    console.print(f"[bold]Segment:[/bold] {full_path}")
+    if show_score:
+        console.print(f"[bold]Score:[/bold] [green]{result.score:.0f}%[/green]")
+    console.print(f"[bold]Date:[/bold] {display_datetime}")
+    console.print(f"[bold]Agent:[/bold] {agent_machine}")
+    console.print(f"[bold]Tags:[/bold] [green]{tags_str}[/green]")
+    console.print(f"[bold]Entities:[/bold] [yellow]{entities_str}[/yellow]")
+    if snippet:
+        console.print(f"[bold]Preview:[/bold] [italic]{snippet}[/italic]")
+    console.print()
+
+
+def format_results_json(results: List[SearchResult], show_score: bool = False) -> str:
+    """Format results as JSON with consistent schema."""
+    formatted = []
+    for r in results:
+        entry = {
+            "path": r.path,
+            "date": r.date,
+            "timestamp": r.first_timestamp or "",
+            "agent": r.agent,
+            "machine": r.machine,
+            "title": r.title,
+            "keywords": r.keywords.split()[:7] if r.keywords else [],
+            "entities": r.entities.split()[:5] if r.entities else [],
+            "snippet": r.snippet or "",
+        }
+        if show_score:
+            entry["score"] = r.score
+        formatted.append(entry)
+    return json.dumps(formatted, indent=2)
 
 
 def _clean_env() -> dict:
@@ -218,26 +305,75 @@ def parse_time_filter(spec: str) -> timedelta:
     raise ValueError(f"Unknown time unit: {unit}")
 
 
-def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[timedelta]]:
-    """Extract query, agent filter, and time filter from args.
+def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[str], Optional[timedelta], List[str]]:
+    """Extract query, agent filter, machine filter, and time filter from args.
 
-    Parses inline syntax like: "query" [2h] @claude
+    Parses inline syntax like:
+      - "query" [2h] @claude          -> agent filter
+      - "query" openclaw@data         -> agent@machine filter
+      - "query" --since 1d            -> time filter (alternative syntax)
 
-    Returns: (query, agent, time_delta)
+    Returns: (query, agent, machine, time_delta, remaining_args)
     """
     agent = None
+    machine = None
     time_delta = None
     query_parts = []
+    remaining_args = []  # Flags like -n, --json, etc.
 
-    for arg in argv:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        # Handle --since / -t inline (for backwards compat)
+        if arg in ('--since', '-t', '--time') and i + 1 < len(argv):
+            try:
+                time_delta = parse_time_filter(argv[i + 1])
+                i += 2
+                continue
+            except ValueError:
+                pass
+
+        # Preserve flags for passthrough
+        if arg.startswith('-'):
+            # Check if it's a flag with value (e.g., -n 3)
+            if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
+                remaining_args.extend([arg, argv[i + 1]])
+                i += 2
+                continue
+            else:
+                remaining_args.append(arg)
+                i += 1
+                continue
+
+        # @agent filter (e.g., @claude)
         if arg.startswith('@'):
-            agent = arg[1:]  # @claude → claude
+            agent = arg[1:]
+        # agent@machine filter (e.g., openclaw@data)
+        elif '@' in arg and not arg.startswith('"') and not arg.startswith("'"):
+            # Check if it looks like agent@machine (no spaces, simple pattern)
+            parts = arg.split('@', 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                # Verify it's not an email or query with @
+                if not '.' in parts[1] or parts[1].count('.') == 0:
+                    agent = parts[0]
+                    machine = parts[1]
+                else:
+                    query_parts.append(arg)
+            else:
+                query_parts.append(arg)
+        # [2h] time filter
         elif arg.startswith('[') and arg.endswith(']'):
-            time_delta = parse_time_filter(arg[1:-1])  # [2h] → 2h
+            try:
+                time_delta = parse_time_filter(arg[1:-1])
+            except ValueError:
+                query_parts.append(arg)
         else:
             query_parts.append(arg)
 
-    return ' '.join(query_parts), agent, time_delta
+        i += 1
+
+    return ' '.join(query_parts), agent, machine, time_delta, remaining_args
 
 
 # =============================================================================
@@ -246,7 +382,8 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[t
 
 def _run_search(query: str, limit: int = 10, json_output: bool = False,
                 files_output: bool = False, agent_filter: str = None,
-                time_filter: timedelta = None, snippet_tokens: int = 15) -> int:
+                machine_filter: str = None, time_filter: timedelta = None,
+                snippet_tokens: int = 15) -> int:
     """Run search using SQLite FTS5 index.
 
     Args:
@@ -255,6 +392,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         json_output: Output as JSON
         files_output: Output file paths only
         agent_filter: Filter by agent name
+        machine_filter: Filter by machine name
         time_filter: Filter to results within this timedelta
         snippet_tokens: Number of tokens in snippet (5-64)
 
@@ -283,6 +421,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         query=query,
         limit=limit,
         agent=agent_filter,
+        machine=machine_filter,
         since=since,
         snippet_tokens=snippet_tokens,
     )
@@ -293,41 +432,13 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
 
     # Format output
     if json_output:
-        formatted = []
-        for r in results:
-            formatted.append({
-                "path": r.path,
-                "date": r.date,
-                "timestamp": r.first_timestamp or "",
-                "agent": r.agent,
-                "machine": r.machine,
-                "title": r.title,
-                "score": r.score,
-                "snippet": r.snippet or "",
-            })
-        print(json.dumps(formatted, indent=2))
+        print(format_results_json(results, show_score=True))
     elif files_output:
         for r in results:
             print(r.path)
     else:
         for r in results:
-            # Format timestamp for display
-            display_date = r.date
-            if r.first_timestamp:
-                try:
-                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
-                    display_date = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-
-            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
-            console.print(f"  [dim]{r.path}[/dim]  [green]{r.score:.0f}%[/green]")
-            if r.snippet:
-                # Clean up snippet: remove excessive whitespace, truncate
-                snippet = ' '.join(r.snippet.split())[:200]
-                if snippet:
-                    console.print(f"  [italic]{snippet}[/italic]")
-            console.print()
+            format_result(r, show_score=True)
 
     return 0
 
@@ -337,6 +448,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     query = args.query
     time_filter = None
     agent_filter = getattr(args, 'agent', None)
+    machine_filter = getattr(args, 'machine', None)
 
     # Check if query is actually a time filter like [15min]
     if query and query.startswith('[') and query.endswith(']'):
@@ -356,7 +468,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 
     # If no query but have time filter, list recent segments
     if not query and time_filter:
-        return cmd_recent_with_filter(time_filter, agent_filter, args.limit or 10, args.json, args.files)
+        return cmd_recent_with_filter(time_filter, agent_filter, machine_filter, args.limit or 10, args.json, args.files)
 
     if not query:
         print("Error: query required (or use -t for time-based listing)", file=sys.stderr)
@@ -368,6 +480,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         json_output=args.json,
         files_output=args.files,
         agent_filter=agent_filter,
+        machine_filter=machine_filter,
         time_filter=time_filter,
         snippet_tokens=args.snippet,
     )
@@ -376,11 +489,12 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_recent_with_filter(
     time_filter: timedelta,
     agent_filter: Optional[str],
+    machine_filter: Optional[str],
     limit: int,
     json_output: bool,
     files_output: bool
 ) -> int:
-    """List recent segments matching time/agent filter (no search query)."""
+    """List recent segments matching time/agent/machine filter (no search query)."""
     workspace_dir = get_workspace_dir()
     index_path = workspace_dir.parent / "index.sqlite"
     now = datetime.now(timezone.utc)
@@ -396,7 +510,7 @@ def cmd_recent_with_filter(
         index = SearchIndex(index_path, workspace_dir)
 
     # List recent segments
-    results = index.list_recent(since=since, limit=limit, agent=agent_filter)
+    results = index.list_recent(since=since, limit=limit, agent=agent_filter, machine=machine_filter)
 
     if not results:
         console.print("[dim]No segments found in time range[/dim]")
@@ -404,37 +518,13 @@ def cmd_recent_with_filter(
 
     # Output
     if json_output:
-        formatted = []
-        for r in results:
-            formatted.append({
-                "path": r.path,
-                "title": r.title,
-                "date": r.date,
-                "timestamp": r.first_timestamp or "",
-                "agent": r.agent,
-                "machine": r.machine,
-                "snippet": r.snippet or "",
-            })
-        print(json.dumps(formatted, indent=2))
+        print(format_results_json(results, show_score=False))
     elif files_output:
         for r in results:
             print(r.path)
     else:
         for r in results:
-            # Format timestamp for display
-            display_date = r.date
-            if r.first_timestamp:
-                try:
-                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
-                    display_date = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-
-            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
-            console.print(f"  [dim]{r.path}[/dim]")
-            if r.snippet:
-                console.print(f"  [italic]{r.snippet[:150]}[/italic]")
-            console.print()
+            format_result(r, show_score=False)
 
     return 0
 
@@ -962,6 +1052,7 @@ def cmd_recent(args: argparse.Namespace) -> int:
         since=since,
         limit=limit,
         agent=getattr(args, 'agent', None),
+        machine=getattr(args, 'machine', None),
     )
 
     if not results:
@@ -971,44 +1062,13 @@ def cmd_recent(args: argparse.Namespace) -> int:
 
     # Output format
     if getattr(args, 'json', False):
-        formatted = []
-        for r in results:
-            formatted.append({
-                "path": r.path,
-                "title": r.title,
-                "date": r.date,
-                "timestamp": r.first_timestamp or "",
-                "agent": r.agent,
-                "machine": r.machine,
-                "snippet": r.snippet or "",
-            })
-        print(json.dumps(formatted, indent=2))
+        print(format_results_json(results, show_score=False))
     elif getattr(args, 'files', False):
         for r in results:
             print(r.path)
     else:
         for r in results:
-            # Calculate relative time
-            age_str = ""
-            if r.first_timestamp:
-                try:
-                    ts = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
-                    age = now - ts
-                    if age.total_seconds() < 3600:
-                        age_str = f"{int(age.total_seconds() / 60)}m ago"
-                    elif age.total_seconds() < 86400:
-                        age_str = f"{int(age.total_seconds() / 3600)}h ago"
-                    else:
-                        age_str = f"{int(age.total_seconds() / 86400)}d ago"
-                except Exception:
-                    pass
-
-            console.print(f"[cyan]{r.date}[/cyan] [bold]{r.title}[/bold] [dim]({age_str})[/dim]")
-            console.print(f"  [dim]{r.path}[/dim]")
-            if r.snippet:
-                # Show entities/keywords
-                console.print(f"  [italic]{r.snippet[:150]}[/italic]")
-            console.print()
+            format_result(r, show_score=False)
 
     return 0
 
@@ -1072,6 +1132,7 @@ def cmd_entity(args: argparse.Namespace) -> int:
         entity_name=entity_name,
         limit=limit,
         agent=getattr(args, 'agent', None),
+        machine=getattr(args, 'machine', None),
     )
 
     if not results:
@@ -1080,40 +1141,13 @@ def cmd_entity(args: argparse.Namespace) -> int:
 
     # Output format
     if args.json:
-        formatted = []
-        for r in results:
-            formatted.append({
-                "path": r.path,
-                "date": r.date,
-                "timestamp": r.first_timestamp or "",
-                "agent": r.agent,
-                "machine": r.machine,
-                "title": r.title,
-                "snippet": r.snippet or "",
-            })
-        print(json.dumps(formatted, indent=2))
+        print(format_results_json(results, show_score=False))
     elif args.files:
         for r in results:
             print(r.path)
     else:
         for r in results:
-            # Format timestamp for display
-            display_date = r.date
-            if r.first_timestamp:
-                try:
-                    dt = datetime.fromisoformat(r.first_timestamp.replace('Z', '+00:00'))
-                    display_date = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-
-            console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
-            console.print(f"  [dim]{r.path}[/dim]")
-            if r.snippet:
-                # Clean up snippet
-                snippet = ' '.join(r.snippet.split())[:200]
-                if snippet:
-                    console.print(f"  [italic]{snippet}[/italic]")
-            console.print()
+            format_result(r, show_score=False)
 
     return 0
 
@@ -1285,9 +1319,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 Collective Agent Memory {version_str}
 
 Search:
-  cam "query"              Hybrid search with reranking (default)
+  cam "query"              Search with weighted ranking (default)
   cam "query" [2h]         Search with time filter
   cam @claude "query"      Search specific agent
+  cam openclaw@data "q"    Filter by agent@machine
   cam search "query"       Keyword search (explicit)
   cam entity "name"        Search by entity (tools, files, concepts)
 
@@ -1308,7 +1343,7 @@ Setup:
   cam logs                 View daemon logs
   cam update               Update CAM to latest version
 
-Filters: -t TIME (15min, 2h, 3d, 1w), -a AGENT (claude, openclaw, cursor)
+Filters: -t/--since TIME (15min, 2h, 3d, 1w), -a AGENT, -m MACHINE
 Output:  -n NUM (result count), --json, --files
 """
 
@@ -1330,6 +1365,7 @@ Output:  -n NUM (result count), --json, --files
         p.add_argument("--files", action="store_true", help="File paths only")
         p.add_argument("-t", "--time", help="Time filter (e.g., 2h, 15min, 3d, 1w)")
         p.add_argument("-a", "--agent", help="Agent filter (e.g., claude, openclaw)")
+        p.add_argument("-m", "--machine", help="Machine filter (e.g., wintermute, data)")
         p.add_argument("-s", "--snippet", type=int, default=15,
                        help="Snippet length in tokens (5-64, default: 15)")
 
@@ -1339,12 +1375,15 @@ Output:  -n NUM (result count), --json, --files
     p_entity = subparsers.add_parser("entity", help="Search by entity")
     p_entity.add_argument("entity", help="Entity name to search for")
     p_entity.add_argument("-n", "--limit", type=int, default=10, help="Number of results")
+    p_entity.add_argument("-a", "--agent", help="Agent filter (e.g., claude, openclaw)")
+    p_entity.add_argument("-m", "--machine", help="Machine filter (e.g., wintermute, data)")
     p_entity.add_argument("--json", action="store_true", help="JSON output")
     p_entity.add_argument("--files", action="store_true", help="File paths only")
 
     p_recent = subparsers.add_parser("recent", help="List recent segments")
     p_recent.add_argument("-t", "--time", default="24h", help="Time window (e.g., 15min, 2h, 3d)")
     p_recent.add_argument("-a", "--agent", help="Agent filter (e.g., claude, openclaw)")
+    p_recent.add_argument("-m", "--machine", help="Machine filter (e.g., wintermute, data)")
     p_recent.add_argument("-n", "--limit", type=int, default=20, help="Number of results")
     p_recent.add_argument("--json", action="store_true", help="JSON output")
     p_recent.add_argument("--files", action="store_true", help="File paths only")
@@ -1414,7 +1453,7 @@ Output:  -n NUM (result count), --json, --files
 
     elif argv and argv[0] not in known_cmds and not argv[0].startswith("-"):
         # Parse inline filters from bare query
-        query, agent, time_delta = parse_query_filters(argv)
+        query, agent, machine, time_delta, remaining_args = parse_query_filters(argv)
 
         # If no query but have time filter, use recent command
         if not query and time_delta:
@@ -1423,6 +1462,9 @@ Output:  -n NUM (result count), --json, --files
             new_argv.extend(["--time", f"{total_secs}s"])
             if agent:
                 new_argv.extend(["--agent", agent])
+            if machine:
+                new_argv.extend(["--machine", machine])
+            new_argv.extend(remaining_args)  # Pass through flags like -n, --json
             argv = new_argv
         else:
             # Rebuild argv with parsed filters as proper arguments for search
@@ -1433,9 +1475,12 @@ Output:  -n NUM (result count), --json, --files
                 new_argv.append("")  # Empty query if only filters provided
             if agent:
                 new_argv.extend(["--agent", agent])
+            if machine:
+                new_argv.extend(["--machine", machine])
             if time_delta:
                 total_secs = int(time_delta.total_seconds())
                 new_argv.extend(["--time", f"{total_secs}s"])
+            new_argv.extend(remaining_args)  # Pass through flags like -n, --json
             argv = new_argv
 
     args = parser.parse_args(argv)

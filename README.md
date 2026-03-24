@@ -81,11 +81,21 @@ cam @openclaw "deployment"             # OpenClaw sessions only
 cam @cursor "refactoring"              # Cursor sessions only
 ```
 
+### Machine Filters
+
+Filter by machine name:
+
+```bash
+cam "error" -m wintermute              # specific machine only
+cam openclaw@data "phase harmonics"   # agent@machine shorthand
+```
+
 ### Combined Filters
 
 ```bash
 cam @claude "error" [2h]               # Claude errors in last 2 hours
-cam query "API" -a openclaw -t 1w      # OpenClaw API work, last week, best search
+cam "API" -a openclaw -t 1w -n 20      # OpenClaw API work, last week
+cam openclaw@data "auth" --since 3d   # agent@machine with --since alias
 ```
 
 ### Entity Search
@@ -115,6 +125,7 @@ The inline `[time]` and `@agent` syntax is shorthand. You can also use flags:
 
 ```bash
 cam search "auth" -t 2h -a claude -n 20
+cam search "error" --since 1d -m wintermute
 ```
 
 ## Commands
@@ -134,16 +145,19 @@ cam search "auth" -t 2h -a claude -n 20
 ## Search Options
 
 
-| Flag       | Description                                           |
-| ---------- | ----------------------------------------------------- |
-| `-n N`     | Number of results (default: 5)                        |
-| `-t TIME`  | Time filter: `15min`, `2h`, `3d`, `1w`                |
-| `-a AGENT` | Agent filter: `claude`, `openclaw`, `cursor`, `codex` |
-| `--json`   | JSON output for scripts                               |
-| `--files`  | Output file paths only                                |
+| Flag            | Description                                           |
+| --------------- | ----------------------------------------------------- |
+| `-n N`          | Number of results (default: 10)                       |
+| `-t TIME`       | Time filter: `15min`, `2h`, `3d`, `1w`                |
+| `--since TIME`  | Alias for `-t`                                        |
+| `-a AGENT`      | Agent filter: `claude`, `openclaw`, `cursor`, `codex` |
+| `-m MACHINE`    | Machine filter: `wintermute`, `data`, etc.            |
+| `-s N`          | Snippet length in tokens (5-64, default: 15)          |
+| `--json`        | JSON output for scripts                               |
+| `--files`       | Output file paths only                                |
 
 
-**Inline syntax**: `[2h]` for time filters, `@claude` for agent filters.
+**Inline syntax**: `[2h]` for time filters, `@claude` for agent filters, `openclaw@data` for agent+machine.
 
 ## Other Commands
 
