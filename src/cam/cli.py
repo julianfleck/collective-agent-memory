@@ -305,21 +305,27 @@ def parse_time_filter(spec: str) -> timedelta:
     raise ValueError(f"Unknown time unit: {unit}")
 
 
-def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[str], Optional[timedelta], List[str]]:
-    """Extract query, agent filter, machine filter, and time filter from args.
+def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[str], Optional[timedelta], Optional[str], List[str]]:
+    """Extract query, agent filter, machine filter, time filter, and sort from args.
 
     Parses inline syntax like:
       - "query" [2h] @claude          -> agent filter
       - "query" openclaw@data         -> agent@machine filter
       - "query" --since 1d            -> time filter (alternative syntax)
+      - "query" [newest]              -> sort by date desc
+      - "query" [2h,newest]           -> time filter + sort
 
-    Returns: (query, agent, machine, time_delta, remaining_args)
+    Returns: (query, agent, machine, time_delta, sort, remaining_args)
     """
     agent = None
     machine = None
     time_delta = None
+    sort_order = None
     query_parts = []
     remaining_args = []  # Flags like -n, --json, etc.
+
+    # Valid sort keywords
+    sort_keywords = {'newest', 'oldest', 'date', 'score', 'best'}
 
     i = 0
     while i < len(argv):
@@ -333,6 +339,12 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[s
                 continue
             except ValueError:
                 pass
+
+        # Handle --sort
+        if arg == '--sort' and i + 1 < len(argv):
+            sort_order = argv[i + 1].lower()
+            i += 2
+            continue
 
         # Preserve flags for passthrough
         if arg.startswith('-'):
@@ -362,18 +374,26 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[s
                     query_parts.append(arg)
             else:
                 query_parts.append(arg)
-        # [2h] time filter
+        # [2h] or [newest] or [2h,newest] bracket syntax
         elif arg.startswith('[') and arg.endswith(']'):
-            try:
-                time_delta = parse_time_filter(arg[1:-1])
-            except ValueError:
-                query_parts.append(arg)
+            bracket_content = arg[1:-1]
+            # Handle comma-separated values like [2h,newest]
+            parts = [p.strip() for p in bracket_content.split(',')]
+            for part in parts:
+                if part.lower() in sort_keywords:
+                    sort_order = part.lower()
+                else:
+                    try:
+                        time_delta = parse_time_filter(part)
+                    except ValueError:
+                        query_parts.append(arg)
+                        break
         else:
             query_parts.append(arg)
 
         i += 1
 
-    return ' '.join(query_parts), agent, machine, time_delta, remaining_args
+    return ' '.join(query_parts), agent, machine, time_delta, sort_order, remaining_args
 
 
 # =============================================================================
@@ -383,7 +403,8 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[s
 def _run_search(query: str, limit: int = 10, json_output: bool = False,
                 files_output: bool = False, agent_filter: str = None,
                 machine_filter: str = None, time_filter: timedelta = None,
-                snippet_tokens: int = 15, fast: bool = False) -> int:
+                snippet_tokens: int = 15, fast: bool = False,
+                sort_order: str = None) -> int:
     """Run search using SQLite FTS5 index.
 
     Args:
@@ -396,6 +417,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         time_filter: Filter to results within this timedelta
         snippet_tokens: Number of tokens in snippet (5-64)
         fast: Skip query expansion for faster search
+        sort_order: Sort order - 'date'/'newest', 'oldest', 'score'/'best' (default: score+recency)
 
     Returns:
         0 on success, 1 on error
@@ -449,14 +471,21 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
             since=since,
             snippet_tokens=snippet_tokens,
             fast=True,  # Already expanded above
+            sort_order=sort_order,
         )
         for r in results:
             if r.path not in seen_paths:
                 all_results.append(r)
                 seen_paths.add(r.path)
 
-    # Sort by score and limit
-    all_results.sort(key=lambda r: -r.score)
+    # Sort merged results based on sort_order
+    if sort_order in ('date', 'newest'):
+        all_results.sort(key=lambda r: r.first_timestamp or '', reverse=True)
+    elif sort_order == 'oldest':
+        all_results.sort(key=lambda r: r.first_timestamp or '')
+    else:
+        # Default: sort by score (with recency boost already applied in search)
+        all_results.sort(key=lambda r: -r.score)
     results = all_results[:limit]
 
     if not results:
@@ -517,6 +546,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         time_filter=time_filter,
         snippet_tokens=args.snippet,
         fast=getattr(args, 'fast', False),
+        sort_order=getattr(args, 'sort', None),
     )
 
 
@@ -1405,6 +1435,8 @@ Speed:   --fast (skip query expansion for faster search)
                        help="Snippet length in tokens (5-64, default: 15)")
         p.add_argument("--fast", action="store_true",
                        help="Skip query expansion for faster search")
+        p.add_argument("--sort", choices=['date', 'newest', 'oldest', 'score', 'best'],
+                       help="Sort order: date/newest, oldest, score/best (default: score+recency)")
 
     p_search = subparsers.add_parser("search", help="Keyword search")
     add_search_args(p_search)
@@ -1490,7 +1522,7 @@ Speed:   --fast (skip query expansion for faster search)
 
     elif argv and argv[0] not in known_cmds and not argv[0].startswith("-"):
         # Parse inline filters from bare query
-        query, agent, machine, time_delta, remaining_args = parse_query_filters(argv)
+        query, agent, machine, time_delta, sort_order, remaining_args = parse_query_filters(argv)
 
         # If no query but have time filter, use recent command
         if not query and time_delta:
@@ -1517,6 +1549,8 @@ Speed:   --fast (skip query expansion for faster search)
             if time_delta:
                 total_secs = int(time_delta.total_seconds())
                 new_argv.extend(["--time", f"{total_secs}s"])
+            if sort_order:
+                new_argv.extend(["--sort", sort_order])
             new_argv.extend(remaining_args)  # Pass through flags like -n, --json
             argv = new_argv
 

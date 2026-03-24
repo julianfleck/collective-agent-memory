@@ -253,6 +253,7 @@ class SearchIndex:
         dynamic_cutoff: bool = True,
         snippet_tokens: int = 15,
         fast: bool = False,
+        sort_order: Optional[str] = None,
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
@@ -271,9 +272,10 @@ class SearchIndex:
             dynamic_cutoff: Apply dynamic cutoff based on score drops
             snippet_tokens: Number of tokens in snippet (default 15, max 64)
             fast: Skip query expansion for faster but less comprehensive search
+            sort_order: Sort order - 'date'/'newest', 'oldest', 'score'/'best' (default: score+recency)
 
         Returns:
-            List of SearchResult objects, sorted by relevance
+            List of SearchResult objects, sorted by relevance or date
         """
         # Clamp snippet tokens
         snippet_tokens = max(5, min(64, snippet_tokens))
@@ -292,12 +294,12 @@ class SearchIndex:
         for q in queries:
             # Try AND query first (precise)
             results = self._search_fts(q, limit, agent, machine, since, use_or=False,
-                                       snippet_tokens=snippet_tokens)
+                                       snippet_tokens=snippet_tokens, sort_order=sort_order)
 
             # If too few results, try OR query (broad)
             if len(results) < 3:
                 or_results = self._search_fts(q, limit, agent, machine, since, use_or=True,
-                                              snippet_tokens=snippet_tokens)
+                                              snippet_tokens=snippet_tokens, sort_order=sort_order)
                 for r in or_results:
                     if r.path not in {x.path for x in results}:
                         results.append(r)
@@ -308,8 +310,14 @@ class SearchIndex:
                     all_results.append(r)
                     seen_paths.add(r.path)
 
-        # Sort by score and limit
-        all_results.sort(key=lambda r: -r.score)
+        # Sort based on sort_order
+        if sort_order in ('date', 'newest'):
+            all_results.sort(key=lambda r: r.first_timestamp or '', reverse=True)
+        elif sort_order == 'oldest':
+            all_results.sort(key=lambda r: r.first_timestamp or '')
+        else:
+            # Default: sort by score (with recency boost)
+            all_results.sort(key=lambda r: -r.score)
         all_results = all_results[:limit]
 
         # Apply dynamic cutoff
@@ -364,6 +372,7 @@ class SearchIndex:
         since: Optional[datetime],
         use_or: bool,
         snippet_tokens: int = 15,
+        sort_order: Optional[str] = None,
     ) -> List[SearchResult]:
         """Execute FTS5 search with given query mode."""
         safe_query = self._prepare_query(query, use_or=use_or)
@@ -405,9 +414,15 @@ class SearchIndex:
             sql += " AND s.first_timestamp >= ?"
             params.append(since.isoformat())
 
-        # Order by score with recency boost (newer = higher priority)
-        # Recency factor: 1 + 0.1 / (days_old + 1), gives ~10% boost to today's docs
-        sql += """ ORDER BY score * (1.0 + 0.1 / (julianday('now') - julianday(s.first_timestamp) + 1)) LIMIT ?"""
+        # Order by specified sort_order
+        if sort_order in ('date', 'newest'):
+            sql += " ORDER BY s.first_timestamp DESC LIMIT ?"
+        elif sort_order == 'oldest':
+            sql += " ORDER BY s.first_timestamp ASC LIMIT ?"
+        else:
+            # Default: score with recency boost (newer = higher priority)
+            # Recency factor: 1 + 0.1 / (days_old + 1), gives ~10% boost to today's docs
+            sql += """ ORDER BY score * (1.0 + 0.1 / (julianday('now') - julianday(s.first_timestamp) + 1)) LIMIT ?"""
         params.append(limit)
 
         results = []

@@ -152,13 +152,27 @@ cam search "error" --since 1d -m wintermute
 | `--since TIME`  | Alias for `-t`                                        |
 | `-a AGENT`      | Agent filter: `claude`, `openclaw`, `cursor`, `codex` |
 | `-m MACHINE`    | Machine filter: `wintermute`, `data`, etc.            |
+| `--sort ORDER`  | Sort order: `date`/`newest`, `oldest`, `score`/`best` |
 | `-s N`          | Snippet length in tokens (5-64, default: 15)          |
 | `--fast`        | Skip query expansion for faster search                |
 | `--json`        | JSON output for scripts                               |
 | `--files`       | Output file paths only                                |
 
 
-**Inline syntax**: `[2h]` for time filters, `@claude` for agent filters, `openclaw@data` for agent+machine.
+**Inline syntax**: `[2h]` for time filters, `@claude` for agent filters, `openclaw@data` for agent+machine, `[newest]` for sort order.
+
+### Sort Order
+
+By default, results are sorted by relevance score with a recency boost (newer results get ~10% boost).
+
+```bash
+cam "query"                   # default: best match + recency boost
+cam "query" --sort newest     # sort by date (newest first)
+cam "query" --sort oldest     # sort by date (oldest first)
+cam "query" --sort score      # sort by relevance only
+cam "query" "[newest]"        # bracket syntax for sort
+cam "query" "[2h,newest]"     # combined: last 2 hours, newest first
+```
 
 ### Query Expansion
 
