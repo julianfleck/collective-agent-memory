@@ -21,6 +21,7 @@ class SearchResult:
     machine: str
     first_timestamp: Optional[str] = None
     last_timestamp: Optional[str] = None
+    snippet: Optional[str] = None  # Text snippet with match context
 
 
 @dataclass
@@ -244,6 +245,8 @@ class SearchIndex:
         limit: int = 10,
         agent: Optional[str] = None,
         since: Optional[datetime] = None,
+        min_score: float = 20.0,
+        dynamic_cutoff: bool = True,
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
@@ -253,11 +256,16 @@ class SearchIndex:
         1. AND query with synonym expansion (precise)
         2. Falls back to OR query if AND returns < 3 results (broad)
 
+        Dynamic cutoff: Stops returning results when there's a significant
+        score drop (>40%) or scores fall below min_score threshold.
+
         Args:
             query: Search query (FTS5 syntax supported)
             limit: Maximum number of results
             agent: Filter by agent name (e.g., 'claude', 'cursor')
             since: Filter to segments after this timestamp
+            min_score: Minimum score threshold (0-100)
+            dynamic_cutoff: Apply dynamic cutoff based on score drops
 
         Returns:
             List of SearchResult objects, sorted by relevance
@@ -278,7 +286,48 @@ class SearchIndex:
             results.sort(key=lambda r: -r.score)
             results = results[:limit]
 
+        # Apply dynamic cutoff
+        if dynamic_cutoff and results:
+            results = self._apply_cutoff(results, min_score)
+
         return results
+
+    def _apply_cutoff(
+        self,
+        results: List[SearchResult],
+        min_score: float = 20.0,
+        drop_threshold: float = 0.4,
+    ) -> List[SearchResult]:
+        """Apply dynamic cutoff to results based on score distribution.
+
+        Cuts off results when:
+        1. Score drops below min_score
+        2. Score drops more than drop_threshold (40%) from previous result
+
+        Always returns at least 1 result if available.
+        """
+        if not results:
+            return results
+
+        filtered = [results[0]]  # Always include first result
+
+        for i in range(1, len(results)):
+            curr = results[i]
+            prev = results[i - 1]
+
+            # Stop if score is too low
+            if curr.score < min_score:
+                break
+
+            # Stop if there's a significant score drop
+            if prev.score > 0:
+                drop = (prev.score - curr.score) / prev.score
+                if drop > drop_threshold:
+                    break
+
+            filtered.append(curr)
+
+        return filtered
 
     def _search_fts(
         self,
@@ -295,6 +344,8 @@ class SearchIndex:
             return []
 
         # Build the query with optional filters
+        # snippet() extracts text around matches: (table, col_idx, start, end, ellipsis, tokens)
+        # Column indices: title=0, keywords=1, entities=2, body=3
         sql = """
             SELECT
                 s.path,
@@ -304,7 +355,8 @@ class SearchIndex:
                 s.agent,
                 s.machine,
                 s.first_timestamp,
-                s.last_timestamp
+                s.last_timestamp,
+                snippet(segments_fts, 3, '', '', '...', 15) as snippet
             FROM segments_fts
             JOIN segments s ON segments_fts.rowid = s.id
             WHERE segments_fts MATCH ?
@@ -342,6 +394,7 @@ class SearchIndex:
                         machine=row['machine'],
                         first_timestamp=row['first_timestamp'],
                         last_timestamp=row['last_timestamp'],
+                        snippet=row['snippet'],
                     ))
             except sqlite3.OperationalError:
                 # Query syntax error - try simpler approach

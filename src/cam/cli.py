@@ -600,6 +600,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
                 "machine": r.machine,
                 "title": r.title,
                 "score": r.score,
+                "snippet": r.snippet or "",
             })
         print(json.dumps(formatted, indent=2))
     elif files_output:
@@ -618,6 +619,11 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
 
             console.print(f"[cyan]{display_date}[/cyan] [bold]{r.title}[/bold]")
             console.print(f"  [dim]{r.path}[/dim]  [green]{r.score:.0f}%[/green]")
+            if r.snippet:
+                # Clean up snippet: remove excessive whitespace, truncate
+                snippet = ' '.join(r.snippet.split())[:200]
+                if snippet:
+                    console.print(f"  [italic]{snippet}[/italic]")
             console.print()
 
     return 0
