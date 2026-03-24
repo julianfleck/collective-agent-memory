@@ -249,6 +249,10 @@ class SearchIndex:
 
         Column weights: title (10x), keywords (5x), entities (3x), body (1x)
 
+        Uses a two-phase search:
+        1. AND query with synonym expansion (precise)
+        2. Falls back to OR query if AND returns < 3 results (broad)
+
         Args:
             query: Search query (FTS5 syntax supported)
             limit: Maximum number of results
@@ -258,9 +262,34 @@ class SearchIndex:
         Returns:
             List of SearchResult objects, sorted by relevance
         """
-        # Escape special FTS5 characters in query for safety
-        # but allow basic operators like AND, OR, NOT
-        safe_query = self._prepare_query(query)
+        # Try AND query first (precise)
+        results = self._search_fts(query, limit, agent, since, use_or=False)
+
+        # If too few results, try OR query (broad)
+        if len(results) < 3:
+            or_results = self._search_fts(query, limit, agent, since, use_or=True)
+            # Merge results, preferring AND matches
+            seen = {r.path for r in results}
+            for r in or_results:
+                if r.path not in seen:
+                    results.append(r)
+                    seen.add(r.path)
+            # Re-sort by score and limit
+            results.sort(key=lambda r: -r.score)
+            results = results[:limit]
+
+        return results
+
+    def _search_fts(
+        self,
+        query: str,
+        limit: int,
+        agent: Optional[str],
+        since: Optional[datetime],
+        use_or: bool,
+    ) -> List[SearchResult]:
+        """Execute FTS5 search with given query mode."""
+        safe_query = self._prepare_query(query, use_or=use_or)
 
         if not safe_query:
             return []
@@ -300,9 +329,9 @@ class SearchIndex:
                 cursor = conn.execute(sql, params)
                 for row in cursor:
                     # BM25 returns negative scores (more negative = better match)
-                    # Convert to positive percentage-like score
+                    # Convert to positive 0-100 scale with better differentiation
                     raw_score = row['score']
-                    normalized_score = min(100, max(0, -raw_score * 10))
+                    normalized_score = min(100, max(0, -raw_score * 5))
 
                     results.append(SearchResult(
                         path=row['path'],
@@ -320,29 +349,90 @@ class SearchIndex:
 
         return results
 
-    def _prepare_query(self, query: str) -> str:
+    # Common synonyms for query expansion
+    SYNONYMS = {
+        'auth': ['authentication', 'login', 'signin'],
+        'authentication': ['auth', 'login', 'signin'],
+        'login': ['auth', 'authentication', 'signin'],
+        'error': ['exception', 'failure', 'bug'],
+        'bug': ['error', 'issue', 'problem'],
+        'config': ['configuration', 'settings', 'setup'],
+        'configuration': ['config', 'settings', 'setup'],
+        'db': ['database', 'sql', 'sqlite'],
+        'database': ['db', 'sql'],
+        'api': ['endpoint', 'route', 'rest'],
+        'test': ['testing', 'spec', 'unittest'],
+        'impl': ['implementation', 'implement'],
+        'implementation': ['impl', 'implement'],
+        'func': ['function', 'method'],
+        'function': ['func', 'method'],
+    }
+
+    def _prepare_query(self, query: str, use_or: bool = False) -> str:
         """Prepare a query string for FTS5.
 
-        Handles common user input patterns and escapes special characters.
+        Args:
+            query: Raw query string
+            use_or: If True, use OR between terms (broader). If False, use AND (precise).
+
+        Returns:
+            FTS5 query string with optional prefix expansion and synonyms.
         """
         if not query or not query.strip():
             return ""
 
-        # Remove problematic characters but keep alphanumeric and spaces
-        # Also keep quotes for phrase matching
-        cleaned = re.sub(r'[^\w\s"@.-]', ' ', query)
+        # Remove problematic characters, convert hyphens/underscores to spaces
+        cleaned = re.sub(r'[^\w\s@.]', ' ', query)
+        cleaned = re.sub(r'[-_]', ' ', cleaned)
 
-        # Split into terms
-        terms = cleaned.split()
+        # Split into terms and filter stopwords
+        stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                     'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                     'would', 'could', 'should', 'may', 'might', 'must', 'shall',
+                     'can', 'need', 'dare', 'ought', 'used', 'to', 'of', 'in',
+                     'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into',
+                     'through', 'during', 'before', 'after', 'above', 'below',
+                     'between', 'under', 'again', 'further', 'then', 'once',
+                     'here', 'there', 'when', 'where', 'why', 'how', 'all',
+                     'each', 'few', 'more', 'most', 'other', 'some', 'such',
+                     'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than',
+                     'too', 'very', 'just', 'and', 'but', 'if', 'or', 'because',
+                     'until', 'while', 'what', 'which', 'who', 'whom', 'this',
+                     'that', 'these', 'those', 'am', 'it', 'its', 'i', 'me',
+                     'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you',
+                     'your', 'yours', 'yourself', 'yourselves', 'he', 'him',
+                     'his', 'himself', 'she', 'her', 'hers', 'herself', 'they',
+                     'them', 'their', 'theirs', 'themselves'}
+
+        terms = [t.lower() for t in cleaned.split() if t.lower() not in stopwords and len(t) > 1]
+        if not terms:
+            # All stopwords - use original terms
+            terms = [t.lower() for t in cleaned.split() if len(t) > 1]
         if not terms:
             return ""
 
-        # If single term, just return it
-        if len(terms) == 1:
-            return terms[0]
+        # Expand each term with synonyms and prefix
+        expanded_terms = []
+        for term in terms:
+            variants = [term]
 
-        # For multiple terms, join with spaces (implicit AND in FTS5)
-        return ' '.join(terms)
+            # Add prefix match for longer terms
+            if len(term) >= 4:
+                variants.append(f"{term}*")
+
+            # Add synonyms
+            if term in self.SYNONYMS:
+                variants.extend(self.SYNONYMS[term])
+
+            # Combine variants with OR
+            if len(variants) > 1:
+                expanded_terms.append(f"({' OR '.join(variants)})")
+            else:
+                expanded_terms.append(term)
+
+        # Join terms - AND for precision, OR for recall
+        joiner = ' OR ' if use_or else ' '
+        return joiner.join(expanded_terms)
 
     def get_stats(self) -> IndexStats:
         """Get statistics about the search index."""
