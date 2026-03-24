@@ -252,17 +252,14 @@ class SearchIndex:
         min_score: float = 20.0,
         dynamic_cutoff: bool = True,
         snippet_tokens: int = 15,
+        fast: bool = False,
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
         Column weights: title (10x), keywords (5x), entities (3x), body (1x)
 
-        Uses a two-phase search:
-        1. AND query with synonym expansion (precise)
-        2. Falls back to OR query if AND returns < 3 results (broad)
-
-        Dynamic cutoff: Stops returning results when there's a significant
-        score drop (>40%) or scores fall below min_score threshold.
+        By default, uses query expansion with a local LLM (HyDE approach) for
+        better recall. Use fast=True to skip expansion for faster searches.
 
         Args:
             query: Search query (FTS5 syntax supported)
@@ -273,6 +270,7 @@ class SearchIndex:
             min_score: Minimum score threshold (0-100)
             dynamic_cutoff: Apply dynamic cutoff based on score drops
             snippet_tokens: Number of tokens in snippet (default 15, max 64)
+            fast: Skip query expansion for faster but less comprehensive search
 
         Returns:
             List of SearchResult objects, sorted by relevance
@@ -280,29 +278,45 @@ class SearchIndex:
         # Clamp snippet tokens
         snippet_tokens = max(5, min(64, snippet_tokens))
 
-        # Try AND query first (precise)
-        results = self._search_fts(query, limit, agent, machine, since, use_or=False,
-                                   snippet_tokens=snippet_tokens)
+        # Get queries to search (expanded or just original)
+        if fast:
+            queries = [query]
+        else:
+            from cam.expand import expand_query
+            queries = expand_query(query)
 
-        # If too few results, try OR query (broad)
-        if len(results) < 3:
-            or_results = self._search_fts(query, limit, agent, machine, since, use_or=True,
-                                          snippet_tokens=snippet_tokens)
-            # Merge results, preferring AND matches
-            seen = {r.path for r in results}
-            for r in or_results:
-                if r.path not in seen:
-                    results.append(r)
-                    seen.add(r.path)
-            # Re-sort by score and limit
-            results.sort(key=lambda r: -r.score)
-            results = results[:limit]
+        # Search all queries and merge results
+        all_results = []
+        seen_paths = set()
+
+        for q in queries:
+            # Try AND query first (precise)
+            results = self._search_fts(q, limit, agent, machine, since, use_or=False,
+                                       snippet_tokens=snippet_tokens)
+
+            # If too few results, try OR query (broad)
+            if len(results) < 3:
+                or_results = self._search_fts(q, limit, agent, machine, since, use_or=True,
+                                              snippet_tokens=snippet_tokens)
+                for r in or_results:
+                    if r.path not in {x.path for x in results}:
+                        results.append(r)
+
+            # Add to all results, avoiding duplicates
+            for r in results:
+                if r.path not in seen_paths:
+                    all_results.append(r)
+                    seen_paths.add(r.path)
+
+        # Sort by score and limit
+        all_results.sort(key=lambda r: -r.score)
+        all_results = all_results[:limit]
 
         # Apply dynamic cutoff
-        if dynamic_cutoff and results:
-            results = self._apply_cutoff(results, min_score)
+        if dynamic_cutoff and all_results:
+            all_results = self._apply_cutoff(all_results, min_score)
 
-        return results
+        return all_results
 
     def _apply_cutoff(
         self,
@@ -426,25 +440,6 @@ class SearchIndex:
 
         return results
 
-    # Common synonyms for query expansion
-    SYNONYMS = {
-        'auth': ['authentication', 'login', 'signin'],
-        'authentication': ['auth', 'login', 'signin'],
-        'login': ['auth', 'authentication', 'signin'],
-        'error': ['exception', 'failure', 'bug'],
-        'bug': ['error', 'issue', 'problem'],
-        'config': ['configuration', 'settings', 'setup'],
-        'configuration': ['config', 'settings', 'setup'],
-        'db': ['database', 'sql', 'sqlite'],
-        'database': ['db', 'sql'],
-        'api': ['endpoint', 'route', 'rest'],
-        'test': ['testing', 'spec', 'unittest'],
-        'impl': ['implementation', 'implement'],
-        'implementation': ['impl', 'implement'],
-        'func': ['function', 'method'],
-        'function': ['func', 'method'],
-    }
-
     def _prepare_query(self, query: str, use_or: bool = False) -> str:
         """Prepare a query string for FTS5.
 
@@ -453,7 +448,7 @@ class SearchIndex:
             use_or: If True, use OR between terms (broader). If False, use AND (precise).
 
         Returns:
-            FTS5 query string with optional prefix expansion and synonyms.
+            FTS5 query string.
         """
         if not query or not query.strip():
             return ""
@@ -488,28 +483,9 @@ class SearchIndex:
         if not terms:
             return ""
 
-        # Expand each term with synonyms and prefix
-        expanded_terms = []
-        for term in terms:
-            variants = [term]
-
-            # Add prefix match for longer terms
-            if len(term) >= 4:
-                variants.append(f"{term}*")
-
-            # Add synonyms
-            if term in self.SYNONYMS:
-                variants.extend(self.SYNONYMS[term])
-
-            # Combine variants with OR
-            if len(variants) > 1:
-                expanded_terms.append(f"({' OR '.join(variants)})")
-            else:
-                expanded_terms.append(term)
-
         # Join terms - AND for precision, OR for recall
         joiner = ' OR ' if use_or else ' '
-        return joiner.join(expanded_terms)
+        return joiner.join(terms)
 
     def get_stats(self) -> IndexStats:
         """Get statistics about the search index."""

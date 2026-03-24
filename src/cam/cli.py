@@ -383,7 +383,7 @@ def parse_query_filters(argv: List[str]) -> Tuple[str, Optional[str], Optional[s
 def _run_search(query: str, limit: int = 10, json_output: bool = False,
                 files_output: bool = False, agent_filter: str = None,
                 machine_filter: str = None, time_filter: timedelta = None,
-                snippet_tokens: int = 15) -> int:
+                snippet_tokens: int = 15, fast: bool = False) -> int:
     """Run search using SQLite FTS5 index.
 
     Args:
@@ -395,6 +395,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         machine_filter: Filter by machine name
         time_filter: Filter to results within this timedelta
         snippet_tokens: Number of tokens in snippet (5-64)
+        fast: Skip query expansion for faster search
 
     Returns:
         0 on success, 1 on error
@@ -424,6 +425,7 @@ def _run_search(query: str, limit: int = 10, json_output: bool = False,
         machine=machine_filter,
         since=since,
         snippet_tokens=snippet_tokens,
+        fast=fast,
     )
 
     if not results:
@@ -483,6 +485,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         machine_filter=machine_filter,
         time_filter=time_filter,
         snippet_tokens=args.snippet,
+        fast=getattr(args, 'fast', False),
     )
 
 
@@ -1345,6 +1348,7 @@ Setup:
 
 Filters: -t/--since TIME (15min, 2h, 3d, 1w), -a AGENT, -m MACHINE
 Output:  -n NUM (result count), --json, --files
+Speed:   --fast (skip query expansion for faster search)
 """
 
     parser = argparse.ArgumentParser(
@@ -1368,6 +1372,8 @@ Output:  -n NUM (result count), --json, --files
         p.add_argument("-m", "--machine", help="Machine filter (e.g., wintermute, data)")
         p.add_argument("-s", "--snippet", type=int, default=15,
                        help="Snippet length in tokens (5-64, default: 15)")
+        p.add_argument("--fast", action="store_true",
+                       help="Skip query expansion for faster search")
 
     p_search = subparsers.add_parser("search", help="Keyword search")
     add_search_args(p_search)
