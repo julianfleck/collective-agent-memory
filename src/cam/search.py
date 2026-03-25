@@ -257,7 +257,7 @@ class SearchIndex:
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
-        Column weights: title (3x), keywords (2x), entities (2x), body (1x)
+        Column weights: title (1x), keywords (2x), entities (2x), body (1x)
 
         By default, uses query expansion with a local LLM (HyDE approach) for
         better recall. Use fast=True to skip expansion for faster searches.
@@ -382,13 +382,14 @@ class SearchIndex:
 
         # Build the query with optional filters
         # snippet() extracts text around matches: (table, col_idx, start, end, ellipsis, tokens)
-        # Column weights: title (3x), keywords (2x), entities (2x), body (1x)
-        # Body-focused weighting since segments are designed as coherent searchable chunks
+        # Column weights: title (1x), keywords (2x), entities (2x), body (1x)
+        # Title weight reduced - auto-generated titles are unreliable
+        # Body is primary since segments are coherent searchable chunks
         sql = f"""
             SELECT
                 s.path,
                 s.title,
-                bm25(segments_fts, 3.0, 2.0, 2.0, 1.0) as score,
+                bm25(segments_fts, 1.0, 2.0, 2.0, 1.0) as score,
                 s.date,
                 s.agent,
                 s.machine,

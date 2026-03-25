@@ -446,27 +446,42 @@ def extract_entities(messages: List[Dict]) -> Dict[str, List[str]]:
         return {}
 
 
+def _is_noisy_term(term: str) -> bool:
+    """Check if a term is noisy and should be excluded from titles."""
+    term_lower = term.lower()
+    # File extensions
+    if term_lower in {'md', 'py', 'js', 'ts', 'json', 'yaml', 'yml', 'txt', 'sh', 'css', 'html'}:
+        return True
+    # Date patterns (2026-03-21, 2026, 03, 21, etc.)
+    if re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}$', term_lower):
+        return True
+    if re.match(r'^\d{2,4}$', term_lower):
+        return True
+    # Generic noise
+    if term_lower in {'section', 'file', 'memory', 'user', 'assistant', 'start', 'end'}:
+        return True
+    return False
+
+
 def generate_title(
     keywords: List[str],
     entities: Dict[str, List[str]],
-    max_terms: int = 6
+    max_terms: int = 4
 ) -> str:
     """
-    Generate a descriptive title by combining keywords and entities.
-
-    Prioritizes named entities (tools, files, technologies) over generic keywords
-    to create more meaningful titles.
+    Generate a short descriptive title from keywords and entities.
 
     Args:
         keywords: List of keywords from KeyBERT
         entities: Dict of entity type -> entity list from GLiNER2
-        max_terms: Maximum number of terms in title
+        max_terms: Maximum number of terms in title (default: 4)
 
     Returns:
         Hyphenated title string
     """
     # Priority order for entity types (most specific first)
-    priority_types = ["tool", "file", "technology", "product", "command", "concept"]
+    priority_types = ["tool", "technology", "product", "command", "concept"]
+    # Skip "file" type - often noisy (.md, paths, etc.)
 
     # Collect unique terms, prioritizing entities
     seen_lower = set()
@@ -478,16 +493,20 @@ def generate_title(
             for entity in entities[etype]:
                 # Normalize for deduplication
                 entity_lower = entity.lower().replace(' ', '-')
-                # Skip if we've seen this term or similar
-                if entity_lower not in seen_lower and len(entity_lower) > 1:
-                    # Also skip if any word in entity was already seen
-                    words = set(entity_lower.split('-'))
-                    if not words & seen_lower:
-                        title_terms.append(entity.replace(' ', '-'))
-                        seen_lower.add(entity_lower)
-                        seen_lower.update(words)
-                        if len(title_terms) >= max_terms:
-                            break
+                # Skip noisy terms
+                if _is_noisy_term(entity):
+                    continue
+                # Skip if too short or already seen
+                if len(entity_lower) <= 2 or entity_lower in seen_lower:
+                    continue
+                # Also skip if any word in entity was already seen
+                words = set(entity_lower.split('-'))
+                if not words & seen_lower:
+                    title_terms.append(entity.replace(' ', '-'))
+                    seen_lower.add(entity_lower)
+                    seen_lower.update(words)
+                    if len(title_terms) >= max_terms:
+                        break
         if len(title_terms) >= max_terms:
             break
 
@@ -496,6 +515,10 @@ def generate_title(
         if len(title_terms) >= max_terms:
             break
         kw_lower = kw.lower().replace(' ', '-')
+        if _is_noisy_term(kw):
+            continue
+        if len(kw_lower) <= 2:
+            continue
         words = set(kw_lower.split('-'))
         # Skip if any word already in title
         if not words & seen_lower:
