@@ -1,88 +1,79 @@
-# Session Search
+# CAM - Collective Agent Memory
 
-Search previous Claude Code / OpenClaw sessions for work, decisions, or code patterns.
+Search previous Claude Code / OpenClaw / Cursor / Codex sessions for work, decisions, or code patterns.
 
 ## Commands
 
 ```sh
-session-search "query"              # Keyword search (default)
-session-search -v "query"           # Semantic search
-session-search -q "query"           # Hybrid search with reranking (best)
-session-search segment <file.jsonl> # Segment a session file
-session-search index                # Index new sessions
-session-search status               # Show index status
-session-search install-service      # Install systemd timer
-session-search skill install        # Install skill to ~/.claude/skills/
-session-search skill install --openclaw  # Install skill to ~/.openclaw/skills/
+cam "query"                    # Search with keyword expansion (default)
+cam search "query"             # Explicit search command
+cam query "question"           # Ask a question, get synthesized answer
+cam entity "docker"            # Search by entity name
+cam get <path>                 # Get segment content
+cam recent                     # List recent segments
+cam status                     # Show index status
+cam reindex                    # Rebuild search index
 ```
 
 ## Search Options
 
 ```sh
 -n <num>        # Number of results (default: 10)
--c <collection> # Collection name (default: sessions)
--v              # Semantic search (vector similarity)
--q              # Hybrid search with reranking
+-t <time>       # Time filter: 15min, 2h, 3d, 1w
+-a <agent>      # Agent filter: claude, openclaw, cursor, codex
+--fast          # Skip query expansion
 --json          # JSON output for scripts
---files         # File list output
+--files         # File paths only
 ```
 
 ## Examples
 
 ```sh
 # Find previous authentication work
-session-search "authentication flow"
+cam "authentication flow"
 
-# Semantic search for concepts
-session-search -v "how to handle rate limiting"
+# Recent work only
+cam "API" -t 2h
 
-# Best quality search
-session-search -q "database schema design decisions"
+# Agent-specific search
+cam "error handling" -a claude
 
-# More results
-session-search "API" -n 20
+# Ask a question
+cam query "how did we implement rate limiting?"
 
 # JSON for scripts
-session-search "error handling" --json
+cam "database" --json
 ```
 
 ## Reading Results
 
 ```sh
-# Get full section via qmd
-qmd get "sessions/2026-03-13/03-setup-work.md" --full
+# Get segment by path
+cam get claude@wintermute/2026-03-15/03-api-design.md
 
-# Or read directly  
-cat ~/.openclaw/workspace/sessions/2026-03-13/03-setup-work.md
-```
-
-## Setup
-
-```sh
-# Install
-curl -fsSL https://raw.githubusercontent.com/julianfleck/session-search/main/install.sh | bash
-
-# Index sessions
-session-search index
-
-# Enable auto-indexing
-session-search install-service
-systemctl --user enable --now session-search.timer
+# Or read directly
+cat ~/.cam/sessions/claude@wintermute/2026-03-15/03-api-design.md
 ```
 
 ## Session Output Structure
 
 ```
-~/.openclaw/workspace/sessions/
-  2026-03-13/
-    01-morning-briefing.md
-    02-research-work.md
-    03-implementation.md
+~/.cam/sessions/
+  claude@laptop/
+    2026-03-15/
+      01-authentication-flow.md
+      02-database-schema.md
+  openclaw@server/
+    2026-03-15/
+      01-api-design.md
 ```
 
-Each section contains YAML frontmatter (session_id, date, message_range) and formatted messages.
+Each segment contains YAML frontmatter (session_id, date, keywords, entities) and formatted messages.
 
 ## Dependencies
 
-- qmd (`npm install -g @tobilu/qmd`) — powers the search
-- sentence-transformers (Python) — for segmentation embeddings
+- Python 3.10+
+- sentence-transformers — for topic segmentation
+- KeyBERT — for keyword extraction
+- GLiNER2 — for entity extraction
+- SQLite FTS5 — for search (built into Python)

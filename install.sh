@@ -69,25 +69,6 @@ install_cam() {
     echo "[ok] CAM installed"
 }
 
-install_qmd() {
-    if command -v qmd &>/dev/null; then
-        echo "[ok] qmd already installed"
-        return 0
-    fi
-
-    echo "Installing qmd..."
-    if command -v npm &>/dev/null; then
-        npm install -g @tobilu/qmd 2>&1 | tail -2
-    elif command -v bun &>/dev/null; then
-        bun install -g @tobilu/qmd 2>&1 | tail -2
-    else
-        echo "[--] npm/bun not found, skipping qmd"
-        echo "     Install Node.js from: https://nodejs.org/"
-        return 1
-    fi
-    echo "[ok] qmd installed"
-}
-
 # =============================================================================
 # Main
 # =============================================================================
@@ -99,15 +80,6 @@ main() {
 
     # Install CAM
     install_cam
-
-    # Install qmd (optional)
-    if command -v npm &>/dev/null || command -v bun &>/dev/null; then
-        install_qmd
-    else
-        echo
-        echo "[--] npm/bun not found (qmd search engine won't be installed)"
-        echo "     Install Node.js from: https://nodejs.org/"
-    fi
 
     # Find cam binary
     CAM_BIN=$(which cam 2>/dev/null || echo "$HOME/.local/bin/cam")
