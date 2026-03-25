@@ -466,64 +466,81 @@ def _is_noisy_term(term: str) -> bool:
 def generate_title(
     keywords: List[str],
     entities: Dict[str, List[str]],
+    text: str = "",
     max_terms: int = 4
 ) -> str:
     """
     Generate a short descriptive title from keywords and entities.
 
+    Uses term frequency in the segment text to rank candidates,
+    picking the most representative terms for the title.
+
     Args:
-        keywords: List of keywords from KeyBERT
+        keywords: List of keywords from KeyBERT (already ranked by relevance)
         entities: Dict of entity type -> entity list from GLiNER2
+        text: Combined segment text for frequency scoring
         max_terms: Maximum number of terms in title (default: 4)
 
     Returns:
         Hyphenated title string
     """
-    # Priority order for entity types (most specific first)
-    priority_types = ["tool", "technology", "product", "command", "concept"]
-    # Skip "file" type - often noisy (.md, paths, etc.)
+    # Collect all candidate terms with scores
+    candidates = []  # (term, score)
+    text_lower = text.lower()
 
-    # Collect unique terms, prioritizing entities
-    seen_lower = set()
-    title_terms = []
+    def term_score(term: str) -> float:
+        """Score a term by frequency in text (simple TF)."""
+        term_lower = term.lower()
+        # Count occurrences (case-insensitive)
+        count = text_lower.count(term_lower)
+        # Bonus for longer terms (more specific)
+        length_bonus = min(len(term_lower) / 10, 1.0)
+        return count + length_bonus
 
-    # First pass: add high-value entities
+    # Add entities with frequency scores
+    # Priority types get a small boost
+    priority_types = ["tool", "technology", "product", "command", "concept", "organization"]
     for etype in priority_types:
         if etype in entities:
             for entity in entities[etype]:
-                # Normalize for deduplication
-                entity_lower = entity.lower().replace(' ', '-')
-                # Skip noisy terms
-                if _is_noisy_term(entity):
+                if _is_noisy_term(entity) or len(entity) <= 2:
                     continue
-                # Skip if too short or already seen
-                if len(entity_lower) <= 2 or entity_lower in seen_lower:
-                    continue
-                # Also skip if any word in entity was already seen
-                words = set(entity_lower.split('-'))
-                if not words & seen_lower:
-                    title_terms.append(entity.replace(' ', '-'))
-                    seen_lower.add(entity_lower)
-                    seen_lower.update(words)
-                    if len(title_terms) >= max_terms:
-                        break
-        if len(title_terms) >= max_terms:
-            break
+                score = term_score(entity) + 0.5  # Small boost for priority entities
+                candidates.append((entity, score))
 
-    # Second pass: fill remaining slots with keywords (if not redundant)
-    for kw in keywords:
+    # Add other entity types without boost
+    for etype, ents in entities.items():
+        if etype in priority_types:
+            continue
+        for entity in ents:
+            if _is_noisy_term(entity) or len(entity) <= 2:
+                continue
+            candidates.append((entity, term_score(entity)))
+
+    # Add keywords (KeyBERT already ranked them, so use position as tiebreaker)
+    for i, kw in enumerate(keywords):
+        if _is_noisy_term(kw) or len(kw) <= 2:
+            continue
+        # Keywords get score from frequency + position bonus (earlier = better)
+        score = term_score(kw) + (len(keywords) - i) * 0.1
+        candidates.append((kw, score))
+
+    # Sort by score (descending)
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    # Pick top unique terms
+    seen_lower = set()
+    title_terms = []
+
+    for term, score in candidates:
         if len(title_terms) >= max_terms:
             break
-        kw_lower = kw.lower().replace(' ', '-')
-        if _is_noisy_term(kw):
-            continue
-        if len(kw_lower) <= 2:
-            continue
-        words = set(kw_lower.split('-'))
+        term_lower = term.lower().replace(' ', '-')
+        words = set(term_lower.split('-'))
         # Skip if any word already in title
         if not words & seen_lower:
-            title_terms.append(kw.replace(' ', '-'))
-            seen_lower.add(kw_lower)
+            title_terms.append(term.replace(' ', '-'))
+            seen_lower.add(term_lower)
             seen_lower.update(words)
 
     if not title_terms:
@@ -696,8 +713,11 @@ def write_sections(
         keywords = extract_keywords(section_messages)
         entities = extract_entities(section_messages)
 
-        # Generate smart title combining keywords and entities
-        title = generate_title(keywords, entities)
+        # Combine message text for title scoring
+        combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+
+        # Generate smart title using frequency scoring
+        title = generate_title(keywords, entities, text=combined_text)
 
         # Generate filename
         filename = f"{i:02d}-{slugify(title)}.md"
@@ -738,7 +758,8 @@ def print_sections(messages: List[Dict], sections: List[Tuple[int, int]]):
         section_messages = messages[start:end + 1]
         keywords = extract_keywords(section_messages)
         entities = extract_entities(section_messages)
-        title = generate_title(keywords, entities)
+        combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+        title = generate_title(keywords, entities, text=combined_text)
 
         print(f"\nSection {i}: Messages {start}-{end} ({end - start + 1} messages)")
         print(f"  Title: {title.replace('-', ' ')}")
