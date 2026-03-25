@@ -27,7 +27,7 @@ import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, Set, List, Dict
+from typing import Optional, Set, List, Dict, Tuple
 from collections import deque
 import logging
 import threading
@@ -43,6 +43,11 @@ DEBOUNCE_SECONDS = 5  # Wait for rapid changes to settle
 QUEUE_POLL_INTERVAL = 2  # Check queue every 2 seconds
 SESSION_TIMEOUT = 300  # 5 minutes max per session before giving up
 SYNC_INTERVAL = 300  # 5 minutes between syncs when idle
+
+# Incremental indexing settings
+INCREMENTAL_DEBOUNCE = 10  # 10 seconds quiet before incremental index
+FULL_REINDEX_DEBOUNCE = 300  # 5 minutes quiet before full re-index
+MIN_NEW_MESSAGES = 6  # Minimum new messages to trigger incremental index
 
 
 def _clean_env() -> dict:
@@ -143,7 +148,7 @@ def is_subagent_session(path: str) -> bool:
     return '/subagents/' in path or '\\subagents\\' in path
 
 
-def queue_pop() -> Optional[str]:
+def queue_pop() -> Optional[Tuple[str, bool]]:
     """Pop the next session to index (priority first, main sessions first, newest first).
 
     Sessions are sorted by:
@@ -151,11 +156,12 @@ def queue_pop() -> Optional[str]:
     2. Main sessions before subagent sessions (to prioritize recent user work)
     3. File modification time (most recent first)
 
-    Skips sessions that don't need indexing (already indexed and not modified).
+    Checks whether sessions need incremental or full indexing based on debounce.
     Also filters out low-value subagent types (prompt_suggestion, compact).
 
     Returns:
-        Path to session file, or None if queues are empty
+        Tuple of (path, incremental) where incremental=True means use incremental indexing,
+        or None if queues are empty or no sessions are ready.
     """
     indexed = get_indexed_sessions()
 
@@ -164,19 +170,32 @@ def queue_pop() -> Optional[str]:
         if queue_file.exists():
             lines = [l for l in queue_file.read_text().strip().split('\n') if l]
             if lines:
-                # Filter out sessions that don't need indexing
-                original_count = len(lines)
-                lines = [l for l in lines if needs_reindex(l, indexed)]
-
                 # Filter out low-value subagent types entirely
+                original_count = len(lines)
                 lines = [l for l in lines if not is_skippable_subagent(l)]
 
-                if original_count != len(lines):
-                    log.debug(f"Filtered {original_count - len(lines)} up-to-date/skippable sessions from queue")
+                # Categorize sessions by what kind of indexing they need
+                ready_for_full = []  # quiet >= 5 min
+                ready_for_incremental = []  # quiet >= 10s but < 5 min
+                not_ready = []  # still active (< 10s since modification)
 
-                if not lines:
-                    # All were up-to-date or skippable, clear this queue file
-                    queue_file.write_text('')
+                for path in lines:
+                    if needs_full_reindex(path, indexed):
+                        ready_for_full.append(path)
+                    elif needs_incremental_index(path, indexed):
+                        ready_for_incremental.append(path)
+                    else:
+                        not_ready.append(path)
+
+                if original_count != len(lines):
+                    log.debug(f"Filtered {original_count - len(lines)} skippable sessions")
+
+                # Prefer full reindex over incremental
+                ready = ready_for_full + ready_for_incremental
+
+                if not ready:
+                    # Nothing ready, keep not_ready in queue for later
+                    queue_file.write_text('\n'.join(not_ready))
                     continue
 
                 # Sort by: main sessions first, then by mtime (newest first)
@@ -185,17 +204,19 @@ def queue_pop() -> Optional[str]:
                         mtime = Path(p).stat().st_mtime
                     except (OSError, FileNotFoundError):
                         mtime = 0
-                    # Main sessions get priority (is_subagent=False sorts before True with negative)
                     is_subagent = 1 if is_subagent_session(p) else 0
-                    # Return tuple: (is_subagent, -mtime) so main sessions come first, then newest
                     return (is_subagent, -mtime)
 
-                lines.sort(key=sort_key)
+                ready.sort(key=sort_key)
 
-                path = lines[0]
-                # Remove from queue and save sorted order
-                queue_file.write_text('\n'.join(lines[1:]))
-                return path
+                path = ready[0]
+                incremental = path in ready_for_incremental
+
+                # Remove selected from queue, keep the rest
+                remaining = ready[1:] + not_ready
+                queue_file.write_text('\n'.join(remaining))
+
+                return (path, incremental)
 
     return None
 
@@ -331,14 +352,20 @@ def mark_session_indexed(path: str):
     STATE_FILE.write_text('\n'.join(lines))
 
 
-def needs_reindex(path: str, indexed: Dict[str, float]) -> bool:
+def needs_reindex(path: str, indexed: Dict[str, float], debounce_seconds: int = 60) -> bool:
     """Check if a session needs (re)indexing based on mtime.
 
     For sessions that were already indexed, we only re-index if:
     1. File has been modified since last index
-    2. File hasn't been modified in the last minute (quick debounce)
+    2. File hasn't been modified for debounce_seconds
 
-    This prevents constant re-indexing of rapidly-changing sessions.
+    Args:
+        path: Session file path
+        indexed: Dict of path -> indexed mtime
+        debounce_seconds: How long file must be quiet (default 60s)
+
+    Returns:
+        True if session needs indexing
     """
     if path not in indexed:
         return True  # Never indexed
@@ -352,17 +379,34 @@ def needs_reindex(path: str, indexed: Dict[str, float]) -> bool:
         current_mtime = stat.st_mtime
         now = time.time()
 
-        # Must be modified since last index
-        if current_mtime <= indexed_mtime + 60:
+        # Must be modified since last index (with small tolerance)
+        if current_mtime <= indexed_mtime + 1:
             return False  # Not modified
 
-        # Must be "quiet" for at least 60 seconds (quick debounce)
-        if now - current_mtime < 60:
+        # Must be "quiet" for debounce period
+        if now - current_mtime < debounce_seconds:
             return False  # Still active
 
         return True
     except (OSError, FileNotFoundError):
         return False
+
+
+def needs_incremental_index(path: str, indexed: Dict[str, float]) -> bool:
+    """Check if a session needs incremental indexing (short debounce).
+
+    Uses INCREMENTAL_DEBOUNCE (10s) instead of full debounce.
+    """
+    return needs_reindex(path, indexed, debounce_seconds=INCREMENTAL_DEBOUNCE)
+
+
+def needs_full_reindex(path: str, indexed: Dict[str, float]) -> bool:
+    """Check if a session needs full re-indexing (long debounce).
+
+    Uses FULL_REINDEX_DEBOUNCE (5 min) - session has been quiet long enough
+    for optimal re-segmentation.
+    """
+    return needs_reindex(path, indexed, debounce_seconds=FULL_REINDEX_DEBOUNCE)
 
 
 class SessionWatcher(FileSystemEventHandler):
@@ -456,8 +500,12 @@ class IndexWorker:
         self.models_loaded = True
         log.info("Models loaded and ready")
 
-    def index_session(self, session_path: str) -> bool:
+    def index_session(self, session_path: str, incremental: bool = False) -> bool:
         """Index a single session file with timeout.
+
+        Args:
+            session_path: Path to session JSONL file
+            incremental: If True, only index new messages since last index
 
         Returns:
             True if successful, False otherwise
@@ -470,7 +518,7 @@ class IndexWorker:
             log.warning(f"Session file not found: {session_path}")
             return False
 
-        def do_index():
+        def do_full_index():
             session_meta, messages = segment.load_session_messages(session_file)
 
             if len(messages) < 6:
@@ -485,19 +533,38 @@ class IndexWorker:
             )
             return (len(sections), written_paths)
 
+        def do_incremental_index():
+            num_new, written_paths = segment.incremental_index_session(
+                session_path=session_file,
+                output_dir=self.output_dir,
+                machine_id=self.machine_id,
+                min_new_messages=MIN_NEW_MESSAGES
+            )
+            return (num_new, written_paths)
+
         try:
             # Run with timeout
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(do_index)
+                if incremental:
+                    future = executor.submit(do_incremental_index)
+                else:
+                    future = executor.submit(do_full_index)
+
                 try:
-                    num_sections, written_paths = future.result(timeout=SESSION_TIMEOUT)
+                    result_count, written_paths = future.result(timeout=SESSION_TIMEOUT)
                     mark_session_indexed(session_path)
-                    if num_sections > 0:
-                        log.info(f"Indexed {session_file.name}: {num_sections} sections")
-                        # Update search index with new segments
+
+                    if result_count > 0:
+                        if incremental:
+                            log.info(f"Incremental indexed {session_file.name}: +{result_count} msgs")
+                        else:
+                            log.info(f"Indexed {session_file.name}: {result_count} sections")
+
+                        # Update search index with new/updated segments
                         if written_paths:
                             self.search_index.index_segments(written_paths)
                     return True
+
                 except FuturesTimeoutError:
                     log.error(f"Timeout indexing {session_file.name} (>{SESSION_TIMEOUT}s)")
                     # Mark as indexed to avoid infinite retry
@@ -535,11 +602,12 @@ class IndexWorker:
         while self.running:
             try:
                 # Pop next item from queue
-                session_path = queue_pop()
+                result = queue_pop()
 
-                if session_path:
+                if result:
+                    session_path, incremental = result
                     # Index the session (search index updated inline)
-                    if self.index_session(session_path):
+                    if self.index_session(session_path, incremental=incremental):
                         sessions_indexed_since_sync += 1
                         consecutive_failures = 0  # Reset on success
                     else:

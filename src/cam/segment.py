@@ -692,6 +692,319 @@ def cleanup_session_segments(output_dir: Path, source_path: str) -> int:
     return deleted
 
 
+# =============================================================================
+# Incremental Indexing
+# =============================================================================
+
+def find_session_segments(output_dir: Path, source_path: str) -> List[Tuple[Path, int, int, int]]:
+    """Find all segments for a session and their message ranges.
+
+    Returns:
+        List of (path, section_index, start_msg, end_msg) tuples, sorted by section_index
+    """
+    segments = []
+    if not output_dir.exists():
+        return segments
+
+    for md_file in output_dir.rglob("*.md"):
+        try:
+            content = md_file.read_text()[:1500]
+            if not content.startswith("---"):
+                continue
+
+            # Parse frontmatter
+            file_source = None
+            section_index = None
+            message_range = None
+
+            for line in content.split('\n'):
+                if line.startswith('source:'):
+                    file_source = line.split(':', 1)[1].strip()
+                elif line.startswith('section_index:'):
+                    section_index = int(line.split(':', 1)[1].strip())
+                elif line.startswith('message_range:'):
+                    # Parse [start, end]
+                    range_str = line.split(':', 1)[1].strip()
+                    range_str = range_str.strip('[]')
+                    parts = range_str.split(',')
+                    if len(parts) == 2:
+                        message_range = (int(parts[0].strip()), int(parts[1].strip()))
+                elif line == '---' and content.index(line) > 3:
+                    break  # End of frontmatter
+
+            if file_source == source_path and section_index is not None and message_range:
+                segments.append((md_file, section_index, message_range[0], message_range[1]))
+
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+
+    # Sort by section index
+    segments.sort(key=lambda x: x[1])
+    return segments
+
+
+def get_last_indexed_message(output_dir: Path, source_path: str) -> Tuple[Optional[Path], int, int]:
+    """Get the last segment and highest message index for a session.
+
+    Returns:
+        (last_segment_path, section_index, last_message_index) or (None, 0, -1) if no segments
+    """
+    segments = find_session_segments(output_dir, source_path)
+    if not segments:
+        return None, 0, -1
+
+    last_segment = segments[-1]
+    return last_segment[0], last_segment[1], last_segment[3]
+
+
+def check_topic_boundary(
+    last_messages: List[Dict],
+    new_messages: List[Dict],
+    threshold: float = 0.75,
+    window_size: int = 3
+) -> bool:
+    """Check if there's a topic boundary between existing and new messages.
+
+    Args:
+        last_messages: Last N messages from existing segment
+        new_messages: First N messages of new content
+        threshold: Similarity threshold (below = boundary)
+        window_size: Number of messages to use for comparison
+
+    Returns:
+        True if there's a topic boundary, False if same topic
+    """
+    if len(last_messages) < window_size or len(new_messages) < window_size:
+        # Not enough messages, assume same topic
+        return False
+
+    # Create text windows
+    last_text = " ".join([msg["text"][:1000] for msg in last_messages[-window_size:]])
+    new_text = " ".join([msg["text"][:1000] for msg in new_messages[:window_size]])
+
+    # Get embeddings
+    embeddings = get_embeddings([last_text[:2000], new_text[:2000]])
+
+    # Compute similarity
+    similarity = cosine_similarity(embeddings[0], embeddings[1])
+
+    return similarity < threshold
+
+
+def extend_segment(
+    segment_path: Path,
+    all_messages: List[Dict],
+    start_idx: int,
+    end_idx: int,
+    session_meta: Dict,
+    session_date: str,
+    section_index: int,
+    machine_id: str
+) -> Path:
+    """Extend an existing segment with new messages.
+
+    Rewrites the segment file with the extended message range.
+
+    Returns:
+        Path to the updated segment file
+    """
+    section_messages = all_messages[start_idx:end_idx + 1]
+    keywords = extract_keywords(section_messages)
+    entities = extract_entities(section_messages)
+
+    # Generate title from all messages
+    combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+    title = generate_title(keywords, entities, text=combined_text)
+
+    # Generate new filename (may change due to new title)
+    new_filename = f"{section_index:02d}-{slugify(title)}.md"
+    new_path = segment_path.parent / new_filename
+
+    # Generate content
+    content = generate_section_markdown(
+        section_idx=section_index,
+        messages=section_messages,
+        session_meta=session_meta,
+        session_date=session_date,
+        semantic_title=title,
+        machine_id=machine_id,
+        keywords=keywords,
+        entities=entities
+    )
+
+    # Remove old file if name changed
+    if new_path != segment_path and segment_path.exists():
+        segment_path.unlink()
+
+    # Write updated segment
+    new_path.write_text(content)
+    return new_path
+
+
+def incremental_index_session(
+    session_path: Path,
+    output_dir: Path,
+    machine_id: str,
+    min_new_messages: int = 6,
+    boundary_threshold: float = 0.75
+) -> Tuple[int, List[Path]]:
+    """Incrementally index new messages in a session.
+
+    Finds where we left off, checks for topic boundaries, and either
+    extends the last segment or creates new ones.
+
+    Args:
+        session_path: Path to session JSONL file
+        output_dir: Output directory for segments
+        machine_id: Machine identifier
+        min_new_messages: Minimum new messages before indexing
+        boundary_threshold: Similarity threshold for topic detection
+
+    Returns:
+        (num_new_messages_indexed, list_of_updated_segment_paths)
+    """
+    session_meta, messages = load_session_messages(session_path)
+    source_path = str(session_path)
+
+    if len(messages) < 6:
+        return 0, []
+
+    # Find last indexed message
+    last_segment_path, last_section_idx, last_msg_idx = get_last_indexed_message(
+        output_dir, source_path
+    )
+
+    # Calculate new messages
+    if last_msg_idx >= 0:
+        new_start_idx = last_msg_idx + 1
+    else:
+        new_start_idx = 0
+
+    new_messages = messages[new_start_idx:]
+
+    if len(new_messages) < min_new_messages:
+        return 0, []
+
+    # Get session date for output path
+    session_start = session_meta.get("started", "")
+    if session_start:
+        try:
+            dt = datetime.fromisoformat(session_start.replace('Z', '+00:00'))
+            session_date = dt.strftime("%Y-%m-%d")
+        except:
+            session_date = "unknown-date"
+    else:
+        session_date = "unknown-date"
+
+    agent = session_meta.get("agent", "unknown")
+    agent_machine_dir = output_dir / f"{agent}@{machine_id}" / session_date
+    agent_machine_dir.mkdir(parents=True, exist_ok=True)
+
+    updated_paths = []
+
+    if last_segment_path is None:
+        # No existing segments - do full segmentation of new messages
+        sections, _ = segment_session(new_messages, threshold=boundary_threshold)
+
+        # Adjust indices to absolute message positions
+        sections = [(s + new_start_idx, e + new_start_idx) for s, e in sections]
+
+        # Write all sections
+        for i, (start, end) in enumerate(sections, 1):
+            section_messages = messages[start:end + 1]
+            keywords = extract_keywords(section_messages)
+            entities = extract_entities(section_messages)
+            combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+            title = generate_title(keywords, entities, text=combined_text)
+
+            filename = f"{i:02d}-{slugify(title)}.md"
+            filepath = agent_machine_dir / filename
+
+            content = generate_section_markdown(
+                section_idx=i,
+                messages=section_messages,
+                session_meta=session_meta,
+                session_date=session_date,
+                semantic_title=title,
+                machine_id=machine_id,
+                keywords=keywords,
+                entities=entities
+            )
+            filepath.write_text(content)
+            updated_paths.append(filepath)
+
+        print(f"  Incremental: created {len(sections)} new segment(s)")
+        return len(new_messages), updated_paths
+
+    # Have existing segments - check for topic boundary
+    # Load last few messages from previous segment for context
+    last_segment_start = max(0, last_msg_idx - 5)
+    last_messages = messages[last_segment_start:last_msg_idx + 1]
+
+    has_boundary = check_topic_boundary(
+        last_messages, new_messages, threshold=boundary_threshold
+    )
+
+    if not has_boundary:
+        # Same topic - extend the last segment
+        # Find the start of the last segment
+        segments = find_session_segments(output_dir, source_path)
+        last_seg = segments[-1]
+        seg_start = last_seg[2]  # start_msg from the segment
+
+        # Extend to include new messages
+        new_end = new_start_idx + len(new_messages) - 1
+
+        updated_path = extend_segment(
+            segment_path=last_segment_path,
+            all_messages=messages,
+            start_idx=seg_start,
+            end_idx=new_end,
+            session_meta=session_meta,
+            session_date=session_date,
+            section_index=last_section_idx,
+            machine_id=machine_id
+        )
+        updated_paths.append(updated_path)
+        print(f"  Incremental: extended segment {last_section_idx} (+{len(new_messages)} msgs)")
+
+    else:
+        # Topic boundary detected - create new segment(s)
+        sections, _ = segment_session(new_messages, threshold=boundary_threshold)
+
+        # Adjust indices and section numbers
+        for i, (start, end) in enumerate(sections):
+            abs_start = start + new_start_idx
+            abs_end = end + new_start_idx
+            section_idx = last_section_idx + 1 + i
+
+            section_messages = messages[abs_start:abs_end + 1]
+            keywords = extract_keywords(section_messages)
+            entities = extract_entities(section_messages)
+            combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+            title = generate_title(keywords, entities, text=combined_text)
+
+            filename = f"{section_idx:02d}-{slugify(title)}.md"
+            filepath = agent_machine_dir / filename
+
+            content = generate_section_markdown(
+                section_idx=section_idx,
+                messages=section_messages,
+                session_meta=session_meta,
+                session_date=session_date,
+                semantic_title=title,
+                machine_id=machine_id,
+                keywords=keywords,
+                entities=entities
+            )
+            filepath.write_text(content)
+            updated_paths.append(filepath)
+
+        print(f"  Incremental: new topic, created {len(sections)} segment(s)")
+
+    return len(new_messages), updated_paths
+
+
 def write_sections(
     messages: List[Dict],
     sections: List[Tuple[int, int]],
