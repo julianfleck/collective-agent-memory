@@ -473,6 +473,14 @@ def _is_noisy_term(term: str) -> bool:
     }
     if term_lower in path_roots:
         return True
+    # Agent names
+    agent_names = {'claude', 'openclaw', 'cursor', 'codex', 'assistant', 'agent', 'bot'}
+    if term_lower in agent_names:
+        return True
+    # Common machine names
+    machine_names = {'localhost', 'wintermute', 'data', 'server', 'local', 'remote', 'host'}
+    if term_lower in machine_names:
+        return True
     return False
 
 
