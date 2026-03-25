@@ -615,11 +615,11 @@ def cmd_query(args: argparse.Namespace) -> int:
         status.start()
 
     try:
-        # Step 1: Extract keywords
+        # Step 1: Expand query into keywords
         if verbose:
-            console.print("[dim]Extracting keywords...[/dim]")
+            console.print("[dim]Expanding query...[/dim]")
         elif status:
-            status.update("Extracting keywords...")
+            status.update("Expanding query...")
 
         from cam.expand import _extract_keywords
         keywords = _extract_keywords(query)
