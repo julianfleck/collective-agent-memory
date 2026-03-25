@@ -666,8 +666,12 @@ def cmd_query(args: argparse.Namespace) -> int:
         elif status:
             status.update("Reading segments...")
 
+        # Read full segments until we hit context limit (~4k tokens = 16k chars)
+        # Small models like llama3.1:8b are slow with larger contexts
+        max_context_chars = 16000
         context_parts = []
-        for r in results[:3]:
+        total_chars = 0
+        for r in results:
             segment_path = workspace_dir / r.path
             if segment_path.exists():
                 try:
@@ -680,9 +684,13 @@ def cmd_query(args: argparse.Namespace) -> int:
                             body = content
                     else:
                         body = content
-                    if len(body) > 3000:
-                        body = body[:3000] + "..."
+                    # Stop if adding this segment would exceed limit
+                    if total_chars + len(body) > max_context_chars and context_parts:
+                        if verbose:
+                            console.print(f"[dim]Context limit reached, using {len(context_parts)} segments[/dim]")
+                        break
                     context_parts.append(f"## {r.title or r.path}\n{body}")
+                    total_chars += len(body)
                 except Exception:
                     pass
 
@@ -710,7 +718,7 @@ Relevant segments:
 
 Answer:"""
 
-        answer = _call_ollama(prompt, timeout=60)
+        answer = _call_ollama(prompt, timeout=180)
 
         if status:
             status.stop()
@@ -1624,7 +1632,7 @@ Speed:   --fast (skip query expansion for faster search)
 
     p_query = subparsers.add_parser("query", help="Answer questions using session memory")
     p_query.add_argument("query", help="Question to answer")
-    p_query.add_argument("-n", "--limit", type=int, default=5, help="Number of segments to search")
+    p_query.add_argument("-n", "--limit", type=int, default=10, help="Number of segments to search")
     p_query.add_argument("-v", "--verbose", action="store_true", help="Show search steps")
     p_query.add_argument("-e", "--effort", choices=['low', 'high'], default='low',
                          help="Effort level: low (default) or high (agentic loop)")
