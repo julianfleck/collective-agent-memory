@@ -176,13 +176,12 @@ Synced at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     fi
 }
 
-update_qmd_index() {
-    if command -v qmd &>/dev/null; then
-        log "Updating qmd index..."
-        cd "$WORKSPACE_DIR"
-        qmd embed 2>&1 || true
+update_search_index() {
+    if command -v cam &>/dev/null; then
+        log "Updating search index..."
+        cam reindex 2>&1 || true
     else
-        log "qmd not installed, skipping index update"
+        log "cam not installed, skipping index update"
     fi
 }
 
@@ -220,7 +219,7 @@ main() {
             pull_latest
             segment_sessions
             commit_and_push
-            update_qmd_index
+            update_search_index
             log "Sync complete!"
             ;;
         status)
@@ -230,7 +229,7 @@ main() {
             check_dependencies
             setup_workspace
             pull_latest
-            update_qmd_index
+            update_search_index
             log "Pull complete!"
             ;;
         push)

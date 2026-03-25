@@ -3,9 +3,21 @@
 # CAM - Collective Agent Memory
 # One-line installer: curl -fsSL https://raw.githubusercontent.com/julianfleck/collective-agent-memory/main/install.sh | bash
 #
+# Options:
+#   -v    Verbose output (show full pip/uv output)
+#
 set -e
 
 REPO="julianfleck/collective-agent-memory"
+VERBOSE=false
+
+# Parse arguments
+while getopts "v" opt; do
+    case $opt in
+        v) VERBOSE=true ;;
+        *) ;;
+    esac
+done
 
 echo "CAM - Collective Agent Memory"
 echo "============================="
@@ -56,14 +68,32 @@ install_cam() {
     echo
     echo "Installing CAM..."
 
-    if command -v uv &>/dev/null; then
-        uv tool install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
-    elif command -v pipx &>/dev/null; then
-        pipx install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
-    elif command -v pip3 &>/dev/null; then
-        pip3 install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+    if $VERBOSE; then
+        # Verbose: show full output
+        if command -v uv &>/dev/null; then
+            echo "[info] Using uv"
+            uv tool install --force "git+https://github.com/$REPO.git"
+        elif command -v pipx &>/dev/null; then
+            echo "[info] Using pipx"
+            pipx install --force "git+https://github.com/$REPO.git"
+        elif command -v pip3 &>/dev/null; then
+            echo "[info] Using pip3"
+            pip3 install --user --force-reinstall "git+https://github.com/$REPO.git"
+        else
+            echo "[info] Using pip"
+            pip install --user --force-reinstall "git+https://github.com/$REPO.git"
+        fi
     else
-        pip install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+        # Quiet: show only last few lines
+        if command -v uv &>/dev/null; then
+            uv tool install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
+        elif command -v pipx &>/dev/null; then
+            pipx install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
+        elif command -v pip3 &>/dev/null; then
+            pip3 install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+        else
+            pip install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+        fi
     fi
 
     echo "[ok] CAM installed"

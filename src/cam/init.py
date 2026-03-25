@@ -528,9 +528,9 @@ def run_init(non_interactive: bool = False):
     console.print(Panel.fit(
         "[bold green]Setup complete![/bold green]\n\n"
         "[bold]Search:[/bold]\n"
-        "  cam search \"query\"   Keyword (fast)\n"
-        "  cam vsearch \"query\"  Semantic\n"
-        "  cam query \"query\"    Hybrid (best)\n\n"
+        "  cam \"query\"          Search with keyword expansion\n"
+        "  cam query \"question\" Ask a question, get answer\n"
+        "  cam entity \"name\"    Search by entity\n\n"
         "[bold]Other:[/bold]\n"
         "  cam status           Show status\n"
         + (f"  cam sync             Sync now\n" if sync_repo else "  cam index            Index sessions\n"),
