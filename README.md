@@ -12,14 +12,15 @@ CAM indexes sessions from Claude Code, Cursor, OpenClaw, and Codex CLI, segments
 
 ## What It Does
 
+- **Context recovery** - Continue previous work with one command: `cam context "topic"`
 - **Search past sessions** - Find previous work with fast weighted keyword search
 - **Entity search** - Find sessions mentioning specific tools, files, concepts, or people
 - **Filter by time** - Get only recent results: last 2 hours, last day, last week
 - **Filter by agent** - Search only Claude, OpenClaw, or other specific agents
 - **Shared memory** - Sync sessions across machines so all agents can search everything
 - **Topic segmentation** - Sessions are automatically split into coherent topics with keywords
-- **Entity extraction** - Typed entities (tools, files, concepts, etc.) are extracted and added to the session metadata
-- **Fast local search** - SQLite FTS5 with weighted fields (title, keywords, entities, body)
+- **Entity extraction** - Typed entities (tools, files, concepts, etc.) are extracted and indexed
+- **Fast local search** - SQLite FTS5 with weighted fields and strong recency boost
 
 ## Install
 
@@ -40,6 +41,19 @@ The installer will:
 The installer + `cam init` writes the required `CAM_*` config automatically, so manual config setup is usually not needed.
 
 ## Usage
+
+### Context Recovery
+
+When you want to continue previous work:
+
+```bash
+cam context                            # context from last session
+cam context "authentication"           # search + compile context (recency-first)
+cam context "auth" --best              # prioritize relevance over recency
+cam context --json                     # JSON output for agents
+```
+
+Returns structured output with topic metadata, extracted context (TODOs, files, decisions), last messages, and full topic content.
 
 ### Basic Search
 
@@ -131,15 +145,17 @@ cam search "error" --since 1d -m wintermute
 ## Commands
 
 
-| Command               | Description                                     |
-| --------------------- | ----------------------------------------------- |
-| `cam "query"`         | Search with weighted ranking (default)          |
-| `cam search "query"`  | Explicit search command                         |
-| `cam entity "name"`   | Search by extracted entity (tools, files, etc.) |
-| `cam [15min]`         | List recent session segments (no search query)  |
-| `cam recent`          | List session segments from last 24h             |
-| `cam get <path>`      | Retrieve a session segment file by path         |
-| `cam reindex`         | Rebuild search index from segments              |
+| Command               | Description                                      |
+| --------------------- | ------------------------------------------------ |
+| `cam context`         | Assemble context from last session               |
+| `cam context "query"` | Search + compile context (recency-first)         |
+| `cam "query"`         | Search with weighted ranking (default)           |
+| `cam search "query"`  | Explicit search command                          |
+| `cam entity "name"`   | Search by extracted entity (tools, files, etc.)  |
+| `cam [15min]`         | List recent topics (no search query)             |
+| `cam recent`          | List topics from last 24h                        |
+| `cam get <path>`      | Retrieve a topic file by path                    |
+| `cam reindex`         | Rebuild search index from topics                 |
 
 
 ## Search Options
@@ -163,7 +179,7 @@ cam search "error" --since 1d -m wintermute
 
 ### Sort Order
 
-By default, results are sorted by relevance score with a recency boost (newer results get ~10% boost).
+By default, search results are sorted by relevance score with a strong recency boost (2x for today, exponential decay).
 
 ```bash
 cam "query"                   # default: best match + recency boost
@@ -300,13 +316,20 @@ cam init -y
 
 ## Agent Skill
 
-CAM installs a skill so agents can search sessions directly in conversation:
+CAM installs a skill so agents can search and recover context directly:
 
 ```
-User: "How did we implement rate limiting before?"
-Agent: [uses /cam skill]
-Agent: "Found 3 relevant sessions. In session from March 10th, we implemented
-        rate limiting using Redis with a sliding window algorithm..."
+User: "Continue where we worked on rate limiting"
+Agent: [runs cam context "rate limiting"]
+Agent: "Found your session from 2 hours ago. You were implementing rate limiting
+        with Redis. Pending: add per-user limits, update tests. Should I continue?"
+```
+
+```
+User: "How did we implement auth before?"
+Agent: [runs cam "authentication"]
+Agent: "Found 3 relevant sessions. In March 10th session, we implemented
+        JWT auth with refresh token rotation..."
 ```
 
 The skill is installed to `~/.claude/skills/cam/`, `~/.openclaw/skills/cam/`, etc.
