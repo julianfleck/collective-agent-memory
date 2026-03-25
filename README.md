@@ -20,7 +20,7 @@ CAM indexes sessions from Claude Code, Cursor, OpenClaw, and Codex CLI, segments
 - **Shared memory** - Sync sessions across machines so all agents can search everything
 - **Topic segmentation** - Sessions are automatically split into coherent topics with keywords
 - **Entity extraction** - Typed entities (tools, files, concepts, etc.) are extracted and indexed
-- **Fast local search** - SQLite FTS5 with weighted fields and strong recency boost
+- **Fast local search** - SQLite FTS5, no embeddings needed, sub-second results
 
 ## Install
 
@@ -221,6 +221,38 @@ cam logs -f                 # follow daemon logs
 cam skill install           # install skill to Claude Code
 cam skill install -a openclaw  # install skill to OpenClaw
 ```
+
+## Performance
+
+CAM uses **SQLite FTS5** for search, not embeddings or vector databases. This means:
+
+- **No GPU required** - Runs on any machine
+- **Instant startup** - No model loading for search
+- **Small index** - ~48MB for 6,600 topics (vs GB+ for vector indices)
+- **Fast search** - Sub-second results even with query expansion
+
+### Benchmarks
+
+Tested on M1 MacBook Pro with 6,600+ indexed topics from 380 sessions:
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Search (fast) | **~50ms** | `--fast` flag, no query expansion |
+| Search (default) | **~350ms** | With LLM query expansion |
+| Context retrieval | **~450ms** | Search + read + parse |
+| Reindex 6,600 topics | **~26s** | ~250 topics/sec |
+
+### Why Not Vector Search?
+
+Vector search (embeddings) is great for semantic similarity but overkill for session memory:
+
+1. **Keywords work** - You remember "auth", "telegram", "that error" - not semantic concepts
+2. **Recency matters more** - You want recent work, not the most semantically similar
+3. **Speed** - FTS5 is ~10x faster than vector similarity search
+4. **Simplicity** - No embedding model to load, no vector DB to maintain
+
+CAM uses embeddings only for **topic segmentation** (splitting sessions into coherent chunks), not for search. The segmentation happens during indexing, so search stays fast.
+
 
 ## How It Works
 
