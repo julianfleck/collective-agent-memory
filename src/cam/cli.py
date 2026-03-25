@@ -273,8 +273,27 @@ def get_sync_repo() -> Optional[str]:
     return get_env("SYNC_REPO") or None
 
 
+def is_skippable_subagent(path: Path) -> bool:
+    """Check if a session file is a skippable subagent type.
+
+    These are internal Claude Code subagents that produce minimal content:
+    - prompt_suggestion: Auto-generated prompt suggestions (2-3 messages)
+    - compact: Context compaction summaries (2-3 messages)
+    """
+    name = path.name.lower()
+    return (
+        'prompt_suggestion' in name or
+        name.startswith('agent-acompact-') or
+        name.startswith('agent-aprompt_suggestion-')
+    )
+
+
 def find_session_files(sessions_dir: Path, include_subagents: bool = True) -> List[Path]:
-    """Find all session JSONL files in the given directory."""
+    """Find all session JSONL files in the given directory.
+
+    Note: Even with include_subagents=True, we filter out low-value subagent types
+    (prompt_suggestion, compact) that produce minimal indexable content.
+    """
     if not sessions_dir.exists():
         return []
 
@@ -286,7 +305,11 @@ def find_session_files(sessions_dir: Path, include_subagents: bool = True) -> Li
 
     if is_claude_code:
         if include_subagents:
-            return sorted(sessions_dir.glob("**/*.jsonl"))
+            # Include subagents but filter out low-value types
+            return sorted(
+                f for f in sessions_dir.glob("**/*.jsonl")
+                if not is_skippable_subagent(f)
+            )
         else:
             return sorted(
                 f for f in sessions_dir.glob("**/*.jsonl")

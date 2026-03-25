@@ -86,8 +86,12 @@ def queue_add(path: str, priority: bool = False) -> bool:
         priority: If True, add to priority queue (for manual cam index)
 
     Returns:
-        True if added, False if already queued
+        True if added, False if already queued or skippable
     """
+    # Reject skippable subagent types at entry
+    if is_skippable_subagent(path):
+        return False
+
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     queue_file = PRIORITY_QUEUE_FILE if priority else NORMAL_QUEUE_FILE
 
@@ -119,13 +123,36 @@ def queue_add(path: str, priority: bool = False) -> bool:
     return True
 
 
-def queue_pop() -> Optional[str]:
-    """Pop the next session to index (priority first, newest first within each queue).
+def is_skippable_subagent(path: str) -> bool:
+    """Check if a session file is a skippable subagent type.
 
-    Sessions are sorted by file modification time (most recent first) so that
-    current work is indexed before backlog.
+    These are internal Claude Code subagents that produce minimal content:
+    - prompt_suggestion: Auto-generated prompt suggestions (2-3 messages)
+    - compact: Context compaction summaries (2-3 messages)
+    """
+    name = Path(path).name.lower()
+    return (
+        'prompt_suggestion' in name or
+        name.startswith('agent-acompact-') or
+        name.startswith('agent-aprompt_suggestion-')
+    )
+
+
+def is_subagent_session(path: str) -> bool:
+    """Check if a session file is in a subagents directory."""
+    return '/subagents/' in path or '\\subagents\\' in path
+
+
+def queue_pop() -> Optional[str]:
+    """Pop the next session to index (priority first, main sessions first, newest first).
+
+    Sessions are sorted by:
+    1. Priority queue before normal queue
+    2. Main sessions before subagent sessions (to prioritize recent user work)
+    3. File modification time (most recent first)
 
     Skips sessions that don't need indexing (already indexed and not modified).
+    Also filters out low-value subagent types (prompt_suggestion, compact).
 
     Returns:
         Path to session file, or None if queues are empty
@@ -141,22 +168,29 @@ def queue_pop() -> Optional[str]:
                 original_count = len(lines)
                 lines = [l for l in lines if needs_reindex(l, indexed)]
 
+                # Filter out low-value subagent types entirely
+                lines = [l for l in lines if not is_skippable_subagent(l)]
+
                 if original_count != len(lines):
-                    log.debug(f"Filtered {original_count - len(lines)} up-to-date sessions from queue")
+                    log.debug(f"Filtered {original_count - len(lines)} up-to-date/skippable sessions from queue")
 
                 if not lines:
-                    # All were up-to-date, clear this queue file
+                    # All were up-to-date or skippable, clear this queue file
                     queue_file.write_text('')
                     continue
 
-                # Sort by file mtime (most recent first)
-                def get_mtime(p):
+                # Sort by: main sessions first, then by mtime (newest first)
+                def sort_key(p):
                     try:
-                        return Path(p).stat().st_mtime
+                        mtime = Path(p).stat().st_mtime
                     except (OSError, FileNotFoundError):
-                        return 0  # Missing files go to end
+                        mtime = 0
+                    # Main sessions get priority (is_subagent=False sorts before True with negative)
+                    is_subagent = 1 if is_subagent_session(p) else 0
+                    # Return tuple: (is_subagent, -mtime) so main sessions come first, then newest
+                    return (is_subagent, -mtime)
 
-                lines.sort(key=get_mtime, reverse=True)
+                lines.sort(key=sort_key)
 
                 path = lines[0]
                 # Remove from queue and save sorted order
@@ -191,7 +225,7 @@ def queue_clear():
 
 
 def queue_clean() -> int:
-    """Remove up-to-date sessions from the queue.
+    """Remove up-to-date and skippable sessions from the queue.
 
     Returns:
         Number of entries removed
@@ -203,8 +237,8 @@ def queue_clean() -> int:
         if queue_file.exists():
             lines = [l for l in queue_file.read_text().strip().split('\n') if l]
             original_count = len(lines)
-            # Keep only sessions that need (re)indexing
-            lines = [l for l in lines if needs_reindex(l, indexed)]
+            # Keep only sessions that need (re)indexing and aren't skippable
+            lines = [l for l in lines if needs_reindex(l, indexed) and not is_skippable_subagent(l)]
             removed = original_count - len(lines)
 
             if removed > 0:
