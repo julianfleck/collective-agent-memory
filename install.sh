@@ -68,35 +68,40 @@ install_cam() {
     echo
     echo "Installing CAM..."
 
+    local GIT_URL="git+https://github.com/$REPO.git"
+
     if $VERBOSE; then
         # Verbose: show full output
         if command -v uv &>/dev/null; then
             echo "[info] Using uv"
-            uv tool install --force "git+https://github.com/$REPO.git"
+            uv tool install --force "$GIT_URL"
         elif command -v pipx &>/dev/null; then
             echo "[info] Using pipx"
-            pipx install --force "git+https://github.com/$REPO.git"
+            pipx install --force "$GIT_URL"
         elif command -v pip3 &>/dev/null; then
             echo "[info] Using pip3"
-            pip3 install --user --force-reinstall "git+https://github.com/$REPO.git"
+            pip3 install --user --force-reinstall --no-cache-dir "$GIT_URL"
         else
             echo "[info] Using pip"
-            pip install --user --force-reinstall "git+https://github.com/$REPO.git"
+            pip install --user --force-reinstall --no-cache-dir "$GIT_URL"
         fi
     else
         # Quiet: show only last few lines
         if command -v uv &>/dev/null; then
-            uv tool install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
+            uv tool install --force "$GIT_URL" 2>&1 | tail -3
         elif command -v pipx &>/dev/null; then
-            pipx install --force "git+https://github.com/$REPO.git" 2>&1 | tail -3
+            pipx install --force "$GIT_URL" 2>&1 | tail -3
         elif command -v pip3 &>/dev/null; then
-            pip3 install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+            pip3 install --user --force-reinstall --no-cache-dir --quiet "$GIT_URL" 2>&1 | tail -3
         else
-            pip install --user --force-reinstall --quiet "git+https://github.com/$REPO.git" 2>&1 | tail -3
+            pip install --user --force-reinstall --no-cache-dir --quiet "$GIT_URL" 2>&1 | tail -3
         fi
     fi
 
-    echo "[ok] CAM installed"
+    # Show installed version
+    local CAM_VERSION
+    CAM_VERSION=$(cam --version 2>/dev/null || echo "unknown")
+    echo "[ok] CAM $CAM_VERSION installed"
 }
 
 # =============================================================================
