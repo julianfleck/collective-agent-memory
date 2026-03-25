@@ -257,7 +257,7 @@ class SearchIndex:
     ) -> List[SearchResult]:
         """Search segments using FTS5 with weighted columns.
 
-        Column weights: title (10x), keywords (5x), entities (3x), body (1x)
+        Column weights: title (3x), keywords (2x), entities (2x), body (1x)
 
         By default, uses query expansion with a local LLM (HyDE approach) for
         better recall. Use fast=True to skip expansion for faster searches.
@@ -382,12 +382,13 @@ class SearchIndex:
 
         # Build the query with optional filters
         # snippet() extracts text around matches: (table, col_idx, start, end, ellipsis, tokens)
-        # Column indices: title=0, keywords=1, entities=2, body=3
+        # Column weights: title (3x), keywords (2x), entities (2x), body (1x)
+        # Body-focused weighting since segments are designed as coherent searchable chunks
         sql = f"""
             SELECT
                 s.path,
                 s.title,
-                bm25(segments_fts, 10.0, 5.0, 3.0, 1.0) as score,
+                bm25(segments_fts, 3.0, 2.0, 2.0, 1.0) as score,
                 s.date,
                 s.agent,
                 s.machine,
@@ -500,9 +501,18 @@ class SearchIndex:
         if not terms:
             return ""
 
+        # Add prefix wildcards for fuzzy matching (e.g., "writ*" matches writing, write, written)
+        # Only add wildcard to terms >= 4 chars to avoid too broad matches
+        terms_with_prefix = []
+        for t in terms:
+            if len(t) >= 4:
+                terms_with_prefix.append(f"{t}*")
+            else:
+                terms_with_prefix.append(t)
+
         # Join terms - AND for precision, OR for recall
         joiner = ' OR ' if use_or else ' '
-        return joiner.join(terms)
+        return joiner.join(terms_with_prefix)
 
     def get_stats(self) -> IndexStats:
         """Get statistics about the search index."""
