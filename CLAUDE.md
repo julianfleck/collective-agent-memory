@@ -6,11 +6,14 @@ Search previous Claude Code / OpenClaw / Cursor / Codex sessions for work, decis
 
 ```sh
 cam "query"                    # Search with keyword expansion (default)
+cam context                    # Assemble context from last session
+cam context "query"            # Search + compile context from matches
+cam context <path>             # Context from specific topic
 cam search "query"             # Explicit search command
 cam query "question"           # Ask a question, get synthesized answer
 cam entity "docker"            # Search by entity name
-cam get <path>                 # Get segment content
-cam recent                     # List recent segments
+cam get <path>                 # Get topic content
+cam recent                     # List recent topics
 cam status                     # Show index status
 cam reindex                    # Rebuild search index
 ```
@@ -29,6 +32,12 @@ cam reindex                    # Rebuild search index
 ## Examples
 
 ```sh
+# Continue last session (context recovery)
+cam context
+
+# Continue where we worked on auth
+cam context "authentication"
+
 # Find previous authentication work
 cam "authentication flow"
 
@@ -43,19 +52,20 @@ cam query "how did we implement rate limiting?"
 
 # JSON for scripts
 cam "database" --json
+cam context --json              # Context as JSON for agents
 ```
 
 ## Reading Results
 
 ```sh
-# Get segment by path
+# Get topic by path
 cam get claude@wintermute/2026-03-15/03-api-design.md
 
 # Or read directly
 cat ~/.cam/sessions/claude@wintermute/2026-03-15/03-api-design.md
 ```
 
-## Session Output Structure
+## Topic Output Structure
 
 ```
 ~/.cam/sessions/
@@ -68,7 +78,7 @@ cat ~/.cam/sessions/claude@wintermute/2026-03-15/03-api-design.md
       01-api-design.md
 ```
 
-Each segment contains YAML frontmatter (session_id, date, keywords, entities) and formatted messages.
+Each topic contains YAML frontmatter (session_id, date, keywords, entities) and formatted messages.
 
 ## Dependencies
 

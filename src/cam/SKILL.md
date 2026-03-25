@@ -7,16 +7,38 @@ description: Search previous Claude Code / Cursor / OpenClaw / Codex sessions fo
 
 Search past sessions to find previous work, decisions, code patterns, or context.
 
+## Context Recovery
+
+When user wants to continue previous work, use `cam context`:
+
+```bash
+cam context                          # Context from last session
+cam context "query"                  # Search + compile (recency-first)
+cam context "query" --best           # Prioritize relevance over recency
+cam context <topic-path>             # Context from specific topic
+cam context --json                   # JSON output for agents
+```
+
+Returns structured output with:
+- Session metadata (agent, machine, date)
+- Extracted context (TODOs, files, decisions)
+- Last 2 user + 2 assistant messages
+- Full topic content
+
 ## Search Commands
 
 ```bash
-# Quick search (SQLite FTS5 with weighted fields)
+# Quick search (SQLite FTS5 with weighted ranking)
 cam "authentication flow"
 cam "error handling" -t 2h             # with time filter
 cam "API design" -n 20                 # more results
 
-# Explicit search command
+# Keyword search (explicit)
 cam search "authentication flow" -t 1d
+
+# Entity search (find by tool, file, concept)
+cam entity "docker"                    # sessions using Docker
+cam entity "config.json"               # sessions with config.json
 
 # Browse recent (no search query)
 cam -t 1h                              # last hour's segments
@@ -27,7 +49,7 @@ cam recent                             # last 24 hours
 ## Filters
 
 ```bash
-# Time filter (-t)
+# Time filter (-t or --since)
 cam "auth" -t 15min                    # last 15 minutes
 cam "auth" -t 2h                       # last 2 hours
 cam "auth" -t 3d                       # last 3 days
@@ -37,8 +59,14 @@ cam "auth" -t 1w                       # last week
 cam "error" -a claude                  # Claude sessions only
 cam "error" -a cursor                  # Cursor sessions only
 
+# Machine filter (-m)
+cam "error" -m wintermute              # specific machine
+
+# Agent@machine filter (shorthand)
+cam openclaw@data "phase harmonics"   # filter by agent and machine
+
 # Combined
-cam "error handling" -t 2h -a claude -n 20
+cam "error handling" -t 2h -a claude -m wintermute -n 20
 
 # Output formats
 cam "database" --json                  # JSON output
@@ -50,7 +78,7 @@ cam "database" --files                 # file paths only
 ```bash
 cam status              # Show status (indexed sessions, segments)
 cam index               # Index new local sessions
-cam reindex             # Rebuild search index from segments
+cam reindex             # Rebuild search index
 cam sync                # Sync with remote repo (if configured)
 cam logs -f             # Follow daemon logs
 cam update              # Update CAM to latest version
@@ -61,8 +89,11 @@ cam update              # Update CAM to latest version
 | Option | Description |
 |--------|-------------|
 | `-t TIME` | Time filter: `15min`, `2h`, `3d`, `1w` |
+| `--since TIME` | Alias for `-t` |
 | `-a AGENT` | Agent filter: `claude`, `cursor`, `openclaw` |
+| `-m MACHINE` | Machine filter: `wintermute`, `data`, etc. |
 | `-n N` | Number of results (default: 10) |
+| `-s N` | Snippet length in tokens (5-64, default: 15) |
 | `--json` | JSON output for scripting |
 | `--files` | File paths only |
 
@@ -82,7 +113,10 @@ Returns:
     "agent": "claude",
     "machine": "wintermute",
     "title": "Section 3: Api Design",
-    "score": 0.85
+    "keywords": ["api", "design", "rest", "endpoints"],
+    "entities": ["FastAPI", "OpenAPI", "REST"],
+    "snippet": "...designing the REST API endpoints using FastAPI...",
+    "score": 85.5
   }
 ]
 ```
@@ -121,7 +155,9 @@ Each file includes provenance (agent, machine, source path) in YAML frontmatter.
 
 ## When to Use
 
-- **Find past work**: "Did I implement X before?"
+- **Continue previous work**: "Continue last session" → `cam context`
+- **Resume specific topic**: "Continue where we worked on auth" → `cam context "auth"`
+- **Find past work**: "Did I implement X before?" → `cam "X"`
 - **Recover decisions**: "What was the decision on Y?" → `cam entity "decision"`
 - **Find by tool/file**: "When did we use Docker?" → `cam entity "docker"`
 - **Code patterns**: "How did I solve Z?"

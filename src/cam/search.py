@@ -422,9 +422,10 @@ class SearchIndex:
         elif sort_order == 'oldest':
             sql += " ORDER BY s.first_timestamp ASC LIMIT ?"
         else:
-            # Default: score with recency boost (newer = higher priority)
-            # Recency factor: 1 + 0.1 / (days_old + 1), gives ~10% boost to today's docs
-            sql += """ ORDER BY score * (1.0 + 0.1 / (julianday('now') - julianday(s.first_timestamp) + 1)) LIMIT ?"""
+            # Default: score with strong recency boost
+            # Exponential decay: score * (1 + 2^(-days/3))
+            # Today: 2x boost, 3 days: 1.5x, 1 week: 1.2x, 2 weeks: 1.1x
+            sql += """ ORDER BY score * (1.0 + power(2.0, -((julianday('now') - julianday(s.first_timestamp)) / 3.0))) LIMIT ?"""
         params.append(limit)
 
         results = []

@@ -1403,6 +1403,302 @@ def cmd_entity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_context(args: argparse.Namespace) -> int:
+    """Assemble context for continuing a session or topic.
+
+    Detects argument type:
+    - No arg → last session
+    - Contains '/' → topic path
+    - Otherwise → search query, compile from top result
+
+    Returns structured output with:
+    - Topic metadata and content
+    - Last 2 user + 2 assistant messages from raw session
+    - Extracted context (TODOs, files, decisions)
+    """
+    from . import segment as seg
+
+    workspace_dir = get_workspace_dir()
+    index_path = workspace_dir.parent / "index.sqlite"
+    ref = args.ref
+    json_output = getattr(args, 'json', False)
+    prefer_score = getattr(args, 'best', False)
+
+    # Ensure index exists
+    if not index_path.exists():
+        console.print("[yellow]Search index not found. Building index...[/yellow]")
+        index = SearchIndex(index_path, workspace_dir)
+        index.rebuild(workspace_dir)
+    else:
+        index = SearchIndex(index_path, workspace_dir)
+
+    # Detect argument type and find topic
+    topic_path = None
+    search_query = None
+
+    if not ref:
+        # No arg → get most recent topic (look back 30 days)
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        results = index.list_recent(since=since, limit=1)
+        if not results:
+            console.print("[yellow]No topics found. Run 'cam index' first.[/yellow]")
+            return 1
+        topic_path = workspace_dir / results[0].path
+    elif '/' in ref:
+        # Looks like a path
+        if ref.startswith('/'):
+            topic_path = Path(ref)
+        else:
+            topic_path = workspace_dir / ref
+        if not topic_path.exists():
+            console.print(f"[red]Topic not found: {ref}[/red]")
+            return 1
+    else:
+        # Treat as search query
+        search_query = ref
+        # Default to recency-first for context recovery; use --best for score-first
+        sort_order = None if prefer_score else 'newest'
+        results = index.search(query=search_query, limit=1, fast=True, sort_order=sort_order)
+        if not results:
+            console.print(f"[yellow]No topics found matching: {search_query}[/yellow]")
+            return 1
+        topic_path = workspace_dir / results[0].path
+
+    if not topic_path or not topic_path.exists():
+        console.print("[red]Could not find topic[/red]")
+        return 1
+
+    # Read topic content
+    topic_content = topic_path.read_text()
+
+    # Parse frontmatter
+    frontmatter = {}
+    body = topic_content
+    if topic_content.startswith("---"):
+        parts = topic_content.split("---", 2)
+        if len(parts) >= 3:
+            try:
+                frontmatter = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                pass
+            body = parts[2].strip()
+
+    # Get source session path from frontmatter
+    source_path = frontmatter.get('source', '')
+    session_id = frontmatter.get('session_id', 'unknown')
+    agent = frontmatter.get('agent', 'unknown')
+    machine = frontmatter.get('machine', 'unknown')
+    date = frontmatter.get('date', '')
+    title = frontmatter.get('title', topic_path.stem)
+
+    # Extract last messages from raw session
+    last_messages = []
+    if source_path and Path(source_path).exists():
+        try:
+            _, messages = seg.load_session_messages(Path(source_path))
+            # Get last 2 user + 2 assistant messages
+            user_msgs = [m for m in messages if m['role'] == 'user'][-2:]
+            asst_msgs = [m for m in messages if m['role'] == 'assistant'][-2:]
+            # Interleave them in order by index
+            all_last = user_msgs + asst_msgs
+            all_last.sort(key=lambda m: m['index'])
+            last_messages = all_last[-4:]  # Last 4 messages total
+        except Exception:
+            pass
+
+    # Extract structured context from topic body
+    todos = []
+    files = []
+    decisions = []
+
+    # Find TODO items (- [ ] or - [x] or TODO: patterns)
+    todo_patterns = [
+        r'- \[[ x]\] (.+)',
+        r'TODO:?\s*(.+)',
+        r'\*\*TODO\*\*:?\s*(.+)',
+    ]
+    for pattern in todo_patterns:
+        todos.extend(re.findall(pattern, body, re.IGNORECASE))
+
+    # Find file references (common file patterns)
+    file_patterns = [
+        r'`([^`]+\.[a-z]{1,4})`',  # `filename.ext`
+        r'(?:^|\s)((?:src|lib|tests?|docs?)/[^\s]+\.[a-z]{1,4})',  # src/path/file.ext
+    ]
+    for pattern in file_patterns:
+        files.extend(re.findall(pattern, body))
+    files = list(dict.fromkeys(files))[:10]  # Dedupe, limit to 10
+
+    # Find decisions (patterns like "decided to", "decision:", "chose")
+    decision_patterns = [
+        r'[Dd]ecided to (.+?)(?:\.|$)',
+        r'[Dd]ecision:?\s*(.+?)(?:\.|$)',
+        r'[Cc]hose to (.+?)(?:\.|$)',
+        r'[Ww]ent with (.+?)(?:\.|$)',
+    ]
+    for pattern in decision_patterns:
+        decisions.extend(re.findall(pattern, body))
+    decisions = decisions[:5]  # Limit to 5
+
+    # Calculate relative path for display
+    try:
+        rel_path = str(topic_path.relative_to(workspace_dir))
+    except ValueError:
+        rel_path = str(topic_path)
+
+    # Calculate relative time
+    relative_time = ""
+    first_ts = frontmatter.get('first_timestamp', '')
+    if first_ts:
+        try:
+            # Handle both ISO format and space-separated format
+            ts_str = str(first_ts).replace('Z', '+00:00')
+            if ' ' in ts_str and 'T' not in ts_str:
+                ts_str = ts_str.replace(' ', 'T', 1)
+            dt = datetime.fromisoformat(ts_str)
+            now = datetime.now(timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = now - dt
+            total_minutes = int(delta.total_seconds() / 60)
+            if total_minutes < 1:
+                relative_time = "just now"
+            elif total_minutes < 60:
+                relative_time = f"{total_minutes}m ago"
+            elif total_minutes < 1440:
+                hours = total_minutes // 60
+                relative_time = f"{hours}h ago"
+            elif total_minutes < 10080:
+                days = total_minutes // 1440
+                relative_time = f"{days}d ago"
+            else:
+                weeks = total_minutes // 10080
+                relative_time = f"{weeks}w ago"
+        except Exception:
+            pass
+
+    # Get keywords and entities from frontmatter
+    keywords = frontmatter.get('keywords', [])
+    if isinstance(keywords, str):
+        keywords = keywords.split()
+    entities_dict = frontmatter.get('entities', {})
+    entities_flat = []
+    if isinstance(entities_dict, dict):
+        for etype, elist in entities_dict.items():
+            if isinstance(elist, list):
+                entities_flat.extend(elist[:3])
+    entities_flat = entities_flat[:5]
+
+    # Build output
+    if json_output:
+        output = {
+            "session_id": session_id,
+            "agent": agent,
+            "machine": machine,
+            "date": date,
+            "title": title,
+            "topic_path": rel_path,
+            "source_session": source_path,
+            "first_timestamp": first_ts,
+            "relative_time": relative_time,
+            "keywords": keywords[:7] if keywords else [],
+            "entities": entities_flat,
+            "context": {
+                "todos": todos[:10],
+                "files": files,
+                "decisions": decisions,
+            },
+            "last_messages": [
+                {
+                    "role": m["role"],
+                    "timestamp": m.get("timestamp", ""),
+                    "text": m["text"][:2000]  # Truncate very long messages
+                }
+                for m in last_messages
+            ],
+            "topic_content": body[:8000],  # Truncate for JSON
+        }
+        print(json.dumps(output, indent=2, default=str))
+    else:
+        # Human-readable output - provenance header (same format as search)
+        console.print("[dim]" + "-" * 60 + "[/dim]")
+        console.print(f"[bold]Topic:[/bold] {workspace_dir / rel_path}")
+        if relative_time:
+            console.print(f"[bold]Date:[/bold] {date} [dim]({relative_time})[/dim]")
+        else:
+            console.print(f"[bold]Date:[/bold] {date}")
+        console.print(f"[bold]Agent:[/bold] {agent}@{machine}")
+        if keywords:
+            tags_str = " ".join(f"#{t}" for t in keywords[:7])
+            console.print(f"[bold]Tags:[/bold] [green]{tags_str}[/green]")
+        if entities_flat:
+            console.print(f"[bold]Entities:[/bold] [yellow]{' '.join(entities_flat)}[/yellow]")
+        console.print("[dim]" + "-" * 60 + "[/dim]")
+        console.print()
+
+        # Title
+        console.print(f"[bold]## {title}[/bold]")
+        console.print()
+
+        # Pending items
+        if todos:
+            console.print("[bold]### Pending Items[/bold]")
+            for todo in todos[:10]:
+                console.print(f"- [ ] {todo}")
+            console.print()
+
+        # Key files
+        if files:
+            console.print("[bold]### Key Files[/bold]")
+            for f in files[:10]:
+                console.print(f"- {f}")
+            console.print()
+
+        # Decisions
+        if decisions:
+            console.print("[bold]### Decisions[/bold]")
+            for d in decisions:
+                console.print(f"- {d}")
+            console.print()
+
+        # Last messages
+        if last_messages:
+            console.print("[dim]" + "-" * 60 + "[/dim]")
+            console.print("[bold]## Last Messages[/bold]")
+            console.print()
+            for msg in last_messages:
+                role = msg["role"].capitalize()
+                ts = msg.get("timestamp", "")
+                if ts:
+                    try:
+                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                        ts = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pass
+
+                text = msg["text"]
+                # Truncate long messages for display
+                if len(text) > 1500:
+                    text = text[:1500] + "\n\n[dim]... (truncated)[/dim]"
+
+                console.print(f"[bold]{role}[/bold] [dim]_{ts}_[/dim]")
+                console.print(text)
+                console.print()
+
+        # Topic content
+        console.print("[dim]" + "-" * 60 + "[/dim]")
+        console.print("[bold]## Topic Content[/bold]")
+        console.print()
+        # Show first part of body
+        if len(body) > 4000:
+            console.print(body[:4000])
+            console.print("\n[dim]... (truncated, use 'cam get <path>' for full content)[/dim]")
+        else:
+            console.print(body)
+
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     """View CAM daemon logs."""
     import platform
@@ -1573,14 +1869,18 @@ Search:
   cam "query"              Search with weighted ranking (default)
   cam "query" [2h]         Search with time filter
   cam @claude "query"      Search specific agent
-  cam openclaw@data "q"    Filter by agent@machine
   cam search "query"       Keyword search (explicit)
   cam entity "name"        Search by entity (tools, files, concepts)
 
+Context:
+  cam context              Assemble context from last session
+  cam context "query"      Search + compile context from matches
+  cam context <path>       Context from specific topic
+
 Browse:
-  cam recent               List session segments from last 24h
-  cam [15min]              List session segments from last 15 minutes
-  cam get <path>           Retrieve a session segment file
+  cam recent               List topics from last 24h
+  cam [15min]              List topics from last 15 minutes
+  cam get <path>           Retrieve a topic file
 
 Manage:
   cam status               Show indexed sessions, sync status
@@ -1591,7 +1891,7 @@ Setup:
   cam init                 Interactive setup
   cam daemon <cmd>         Manage background daemon (start|stop|clean)
   cam skill install        Install /cam skill to agent
-  cam logs                 View daemon logs
+  cam logs [-f]            View daemon logs
   cam update               Update CAM to latest version
 
 Filters: -t/--since TIME (15min, 2h, 3d, 1w), -a AGENT, -m MACHINE
@@ -1657,6 +1957,13 @@ Speed:   --fast (skip query expansion for faster search)
     p_get.add_argument("path", help="Session segment path (e.g., claude@wintermute/2026-03-15/01-file.md)")
     p_get.add_argument("--meta", action="store_true", help="Output only frontmatter as JSON")
 
+    p_context = subparsers.add_parser("context", help="Assemble context for continuing work")
+    p_context.add_argument("ref", nargs="?", default=None,
+                           help="Topic path, session ID, or search query (default: last session)")
+    p_context.add_argument("--json", action="store_true", help="JSON output for agents")
+    p_context.add_argument("--best", action="store_true",
+                           help="Prioritize relevance score over recency (default: recency-first)")
+
     # Management commands
     p_index = subparsers.add_parser("index", help="Index new sessions")
     p_index.add_argument("-s", "--sessions-dir")
@@ -1709,7 +2016,7 @@ Speed:   --fast (skip query expansion for faster search)
 
     # Handle bare search query with inline filters
     # e.g., cam "query" [2h] @claude or cam [15min] or cam -t 30min
-    known_cmds = {"search", "query", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get"}
+    known_cmds = {"search", "query", "segment", "index", "reindex", "sync", "status", "daemon", "skill", "init", "logs", "update", "entity", "recent", "get", "context"}
 
     # Handle cam -t TIME (shorthand for cam recent -t TIME)
     if argv and argv[0] in ("-t", "--time") and len(argv) >= 2:
@@ -1783,6 +2090,8 @@ Speed:   --fast (skip query expansion for faster search)
         return cmd_recent(args)
     elif args.command == "get":
         return cmd_get(args)
+    elif args.command == "context":
+        return cmd_context(args)
     else:
         parser.print_help()
         return 0

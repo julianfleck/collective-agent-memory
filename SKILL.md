@@ -7,6 +7,24 @@ description: Search previous Claude Code / Cursor / OpenClaw / Codex sessions fo
 
 Search past sessions to find previous work, decisions, code patterns, or context.
 
+## Context Recovery
+
+When user wants to continue previous work, use `cam context`:
+
+```bash
+cam context                          # Context from last session
+cam context "query"                  # Search + compile (recency-first)
+cam context "query" --best           # Prioritize relevance over recency
+cam context <topic-path>             # Context from specific topic
+cam context --json                   # JSON output for agents
+```
+
+Returns structured output with:
+- Session metadata (agent, machine, date)
+- Extracted context (TODOs, files, decisions)
+- Last 2 user + 2 assistant messages
+- Full topic content
+
 ## Search Commands
 
 ```bash
@@ -137,7 +155,9 @@ Each file includes provenance (agent, machine, source path) in YAML frontmatter.
 
 ## When to Use
 
-- **Find past work**: "Did I implement X before?"
+- **Continue previous work**: "Continue last session" → `cam context`
+- **Resume specific topic**: "Continue where we worked on auth" → `cam context "auth"`
+- **Find past work**: "Did I implement X before?" → `cam "X"`
 - **Recover decisions**: "What was the decision on Y?" → `cam entity "decision"`
 - **Find by tool/file**: "When did we use Docker?" → `cam entity "docker"`
 - **Code patterns**: "How did I solve Z?"
