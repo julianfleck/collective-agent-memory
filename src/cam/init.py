@@ -8,6 +8,7 @@ Handles agent detection, sync configuration, and initial indexing.
 import os
 import subprocess
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -19,6 +20,49 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich import print as rprint
 
 console = Console()
+
+
+def check_index_health(workspace_dir: Path) -> Tuple[int, int, bool]:
+    """Check if search index needs rebuilding.
+
+    Returns:
+        Tuple of (segments_on_disk, segments_indexed, needs_reindex)
+    """
+    # Count segments on disk
+    segments_on_disk = 0
+    if workspace_dir.exists():
+        segments_on_disk = len(list(workspace_dir.rglob("*.md")))
+
+    # Count segments in index
+    index_path = workspace_dir.parent / "index.sqlite"
+    segments_indexed = 0
+
+    if index_path.exists():
+        try:
+            with sqlite3.connect(index_path) as conn:
+                result = conn.execute("SELECT COUNT(*) FROM segments").fetchone()
+                segments_indexed = result[0] if result else 0
+        except sqlite3.Error:
+            pass  # Index might be corrupted or have wrong schema
+
+    # Need reindex if there are segments but index is empty/missing
+    needs_reindex = segments_on_disk > 0 and segments_indexed == 0
+
+    return segments_on_disk, segments_indexed, needs_reindex
+
+
+def run_reindex(workspace_dir: Path) -> bool:
+    """Run cam reindex command."""
+    try:
+        result = subprocess.run(
+            ["cam", "reindex"],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 # Models required by CAM
 REQUIRED_MODELS = [
@@ -522,6 +566,31 @@ def run_init(non_interactive: bool = False):
             else:
                 console.print()
                 console.print("[dim]Run 'cam index' to index sessions later[/dim]")
+
+    # Check search index health
+    segments_on_disk, segments_indexed, needs_reindex = check_index_health(workspace_dir)
+
+    if needs_reindex:
+        console.print()
+        console.print(f"[yellow]Search index needs rebuilding[/yellow]")
+        console.print(f"[dim]{segments_on_disk} segments on disk, {segments_indexed} indexed[/dim]")
+
+        if non_interactive:
+            console.print("[dim]Building search index...[/dim]")
+            if run_reindex(workspace_dir):
+                console.print("[green]Search index rebuilt[/green]")
+            else:
+                console.print("[yellow]Reindex failed - run 'cam reindex' manually[/yellow]")
+        else:
+            if Confirm.ask("Build search index now?", default=True):
+                console.print()
+                console.print("[dim]Building search index...[/dim]")
+                if run_reindex(workspace_dir):
+                    console.print("[green]Search index rebuilt[/green]")
+                else:
+                    console.print("[yellow]Reindex failed - run 'cam reindex' manually[/yellow]")
+            else:
+                console.print("[dim]Run 'cam reindex' to build the search index[/dim]")
 
     # Final summary
     console.print()

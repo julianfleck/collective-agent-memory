@@ -164,7 +164,7 @@ def _clean_env() -> dict:
 
 
 # Version
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def get_version_string() -> str:
