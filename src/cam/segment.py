@@ -460,6 +460,19 @@ def _is_noisy_term(term: str) -> bool:
     # Generic noise
     if term_lower in {'section', 'file', 'memory', 'user', 'assistant', 'start', 'end'}:
         return True
+    # Path roots (not leaf filenames)
+    path_roots = {
+        # System paths
+        'users', 'home', 'root', 'var', 'tmp', 'etc', 'usr', 'opt', 'bin', 'sbin', 'lib',
+        # User folders
+        'documents', 'downloads', 'desktop', 'library', 'applications', 'pictures', 'music', 'videos',
+        # Common personal folders
+        'tresors', 'privat', 'private', 'personal', 'work', 'projects',
+        # Project structure
+        'src', 'dist', 'build', 'node_modules', 'venv', 'env', '.git', 'vendor',
+    }
+    if term_lower in path_roots:
+        return True
     return False
 
 
