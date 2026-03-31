@@ -40,7 +40,8 @@ from cam.search import SearchIndex
 # Configuration
 IDLE_TIMEOUT = 300  # 5 minutes of no activity before queueing
 DEBOUNCE_SECONDS = 5  # Wait for rapid changes to settle
-QUEUE_POLL_INTERVAL = 2  # Check queue every 2 seconds
+QUEUE_POLL_INTERVAL = 10  # Check queue every 10 seconds when idle
+QUEUE_POLL_INTERVAL_ACTIVE = 2  # Check every 2 seconds when actively processing
 SESSION_TIMEOUT = 300  # 5 minutes max per session before giving up
 SYNC_INTERVAL = 300  # 5 minutes between syncs when idle
 
@@ -309,12 +310,31 @@ def queue_stats_by_source() -> Dict[str, int]:
 # Indexed Sessions State
 # =============================================================================
 
-def get_indexed_sessions() -> Dict[str, float]:
+# Cache for indexed sessions to avoid re-parsing 93MB file every 2 seconds
+_indexed_sessions_cache: Dict[str, float] = {}
+_indexed_sessions_mtime: float = 0.0
+
+
+def get_indexed_sessions(force_reload: bool = False) -> Dict[str, float]:
     """Get dict of indexed session paths -> mtime when indexed.
 
     Format in file: path:mtime (one per line)
     Also supports legacy format (path only) for backwards compatibility.
+
+    Uses in-memory cache, only reloads when file changes.
     """
+    global _indexed_sessions_cache, _indexed_sessions_mtime
+
+    # Check if file has changed
+    try:
+        current_mtime = STATE_FILE.stat().st_mtime
+    except (OSError, FileNotFoundError):
+        return {}
+
+    if not force_reload and current_mtime == _indexed_sessions_mtime and _indexed_sessions_cache:
+        return _indexed_sessions_cache
+
+    # Reload from file
     indexed = {}
     if STATE_FILE.exists():
         for line in STATE_FILE.read_text().strip().split('\n'):
@@ -331,11 +351,22 @@ def get_indexed_sessions() -> Dict[str, float]:
                     continue
             # Legacy format - path only, use mtime=0
             indexed[line] = 0.0
+
+    _indexed_sessions_cache = indexed
+    _indexed_sessions_mtime = current_mtime
     return indexed
+
+
+def invalidate_indexed_sessions_cache():
+    """Invalidate the indexed sessions cache after writing."""
+    global _indexed_sessions_mtime
+    _indexed_sessions_mtime = 0.0
 
 
 def mark_session_indexed(path: str):
     """Mark a session as indexed with current mtime."""
+    global _indexed_sessions_cache, _indexed_sessions_mtime
+
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     indexed = get_indexed_sessions()
 
@@ -350,6 +381,13 @@ def mark_session_indexed(path: str):
     # Write in new format
     lines = [f"{p}:{m}" for p, m in sorted(indexed.items())]
     STATE_FILE.write_text('\n'.join(lines))
+
+    # Update cache in-place instead of invalidating
+    _indexed_sessions_cache = indexed
+    try:
+        _indexed_sessions_mtime = STATE_FILE.stat().st_mtime
+    except (OSError, FileNotFoundError):
+        _indexed_sessions_mtime = 0.0
 
 
 def needs_reindex(path: str, indexed: Dict[str, float], debounce_seconds: int = 60) -> bool:
@@ -598,6 +636,7 @@ class IndexWorker:
         consecutive_failures = 0
         max_consecutive_failures = 10  # Restart daemon after this many failures
         last_sync = datetime.now()
+        was_active = False  # Track if we were processing in the last iteration
 
         while self.running:
             try:
@@ -617,6 +656,7 @@ class IndexWorker:
                             # Exit to let launchd/systemd restart us fresh
                             self.running = False
                             break
+                    was_active = True
                 else:
                     # Queue empty - sync if we have new segments or enough time has passed
                     time_since_sync = (datetime.now() - last_sync).total_seconds()
@@ -630,9 +670,11 @@ class IndexWorker:
                             sessions_indexed_since_sync = 0
                         last_sync = datetime.now()
 
-                    # Wait before checking again
-                    time.sleep(QUEUE_POLL_INTERVAL)
+                    # Adaptive polling: shorter interval right after activity, longer when idle
+                    poll_interval = QUEUE_POLL_INTERVAL_ACTIVE if was_active else QUEUE_POLL_INTERVAL
+                    time.sleep(poll_interval)
                     consecutive_failures = 0  # Reset when queue is empty
+                    was_active = False
 
             except KeyboardInterrupt:
                 break
