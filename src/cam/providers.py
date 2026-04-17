@@ -13,11 +13,14 @@ Entity extraction (GLiNER2) is disabled in headed mode.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
+
+log = logging.getLogger("cam-providers")
 
 # Provider registry. Each entry describes the env var, endpoint, and request
 # shape. Kept as a plain dict (not a class hierarchy) because the abstraction
@@ -210,7 +213,7 @@ def analyze_section(section_text: str, max_chars: int = 6000) -> Dict:
         raw = _extract_text(provider, resp.json())
         data = _parse_json_loose(raw)
     except (requests.RequestException, ValueError, KeyError) as e:
-        print(f"[headed] analyze_section failed: {e}")
+        log.warning("analyze_section failed: %s", e)
         return {}
 
     title = str(data.get("title", "")).strip()

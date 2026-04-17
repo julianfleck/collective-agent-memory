@@ -58,7 +58,7 @@ In **headed** mode, `cam init` prompts for a provider (OpenAI / OpenRouter / Ant
 
 | Capability                       | Local                          | Headed                                        |
 | -------------------------------- | ------------------------------ | --------------------------------------------- |
-| Daemon resident memory           | ~1.3 GB                        | < 400 MB                                      |
+| Daemon resident memory           | ~1.3 GB                        | < 200 MB                                      |
 | Title + keywords                 | KeyBERT (local model)          | Provider's chat completion (`analyze_section`) |
 | Topic segmentation               | Embedding similarity (semantic) | Fixed-size chunks (20 messages)               |
 | Typed entity extraction (GLiNER2) | ✓                              | **Off** — no reliable cloud equivalent without a second API key. Pre-approved asymmetry; entity search returns no results in headed mode. |

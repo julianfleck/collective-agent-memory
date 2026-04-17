@@ -345,7 +345,7 @@ def prompt_mode_and_provider(
         )
         console.print(
             "[dim]Headed mode skips local models and uses a cloud LLM API "
-            "(~400 MB resident instead of ~1.3 GB).[/dim]"
+            "(~200 MB resident instead of ~1.3 GB).[/dim]"
         )
         console.print()
         if non_interactive:
