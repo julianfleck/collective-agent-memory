@@ -19,7 +19,24 @@ from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import print as rprint
 
+from . import providers
+
 console = Console()
+
+# Memory threshold for local mode in GB.
+# Local models occupy ~1.3 GB at steady state (sentence-transformers + KeyBERT
+# + GLiNER2). Add Python runtime (~200 MB), index growth, OS overhead, and
+# headroom for the user's actual workload — 6 GB is the conservative floor
+# below which the daemon will likely thrash or OOM-kill.
+LOCAL_MODE_MIN_RAM_GB = 6.0
+
+# Provider registry for headed mode, in user-prompt display order.
+# (key, display name, env-var name expected by the provider)
+PROVIDER_CHOICES: List[Tuple[str, str, str]] = [
+    ("openai", "OpenAI", "OPENAI_API_KEY"),
+    ("openrouter", "OpenRouter", "OPENROUTER_API_KEY"),
+    ("anthropic", "Anthropic", "ANTHROPIC_API_KEY"),
+]
 
 
 def check_index_health(workspace_dir: Path) -> Tuple[int, int, bool]:
@@ -237,7 +254,13 @@ def setup_workspace(sync_repo: Optional[str], machine_id: str) -> Path:
     return workspace_dir
 
 
-def write_config(sync_repo: Optional[str], workspace_dir: Path, machine_id: str):
+def write_config(
+    sync_repo: Optional[str],
+    workspace_dir: Path,
+    machine_id: str,
+    mode: str = "local",
+    provider: Optional[str] = None,
+):
     """Write CAM configuration file."""
     config_dir = Path.home() / ".cam"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -249,8 +272,123 @@ def write_config(sync_repo: Optional[str], workspace_dir: Path, machine_id: str)
         lines.append(f"CAM_SYNC_REPO={sync_repo}")
     lines.append(f"CAM_WORKSPACE_DIR={workspace_dir}")
     lines.append(f"CAM_MACHINE_ID={machine_id}")
+    lines.append(f"CAM_MODE={mode}")
+    if provider:
+        lines.append(f"CAM_PROVIDER={provider}")
 
     config_file.write_text("\n".join(lines) + "\n")
+
+
+def read_total_ram_gb() -> float:
+    """Read total system RAM in GB from /proc/meminfo. Returns 0.0 if unreadable.
+
+    Uses /proc/meminfo directly to avoid a psutil runtime dep on a constrained
+    install path.
+    """
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+    except OSError:
+        return 0.0
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    kb = int(parts[1])
+                    return kb / (1024 * 1024)
+                except ValueError:
+                    return 0.0
+    return 0.0
+
+
+def prompt_mode_and_provider(
+    non_interactive: bool = False,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Decide CAM mode + (if headed) provider + API key based on host RAM.
+
+    Loud-failure discipline: on a constrained host (<6 GB), we will NOT
+    silently fall back to local mode. The user picks headed or aborts.
+
+    Returns:
+        (mode, provider_key, api_key) — provider_key/api_key are None for local.
+    """
+    total_gb = read_total_ram_gb()
+    console.print("[bold]Checking host capacity...[/bold]")
+    if total_gb > 0:
+        console.print(f"  Total RAM: [cyan]{total_gb:.1f} GB[/cyan]  (local-mode threshold: {LOCAL_MODE_MIN_RAM_GB:.0f} GB)")
+    else:
+        console.print("  [yellow]Could not read /proc/meminfo (non-Linux host?). Treating as 0 GB.[/yellow]")
+    console.print()
+
+    sufficient = total_gb >= LOCAL_MODE_MIN_RAM_GB
+
+    if sufficient:
+        console.print(
+            "[dim]Local mode loads ~1.3 GB of ML models (sentence-transformers, KeyBERT, GLiNER2). "
+            "Headed mode skips local models and routes title/keyword extraction to a cloud LLM API.[/dim]"
+        )
+        if non_interactive:
+            mode = "local"
+        else:
+            mode = Prompt.ask(
+                "Mode",
+                choices=["local", "headed"],
+                default="local",
+            )
+        if mode == "local":
+            return ("local", None, None)
+    else:
+        console.print(
+            f"[bold red]WARNING:[/bold red] {total_gb:.1f} GB RAM is below the {LOCAL_MODE_MIN_RAM_GB:.0f} GB "
+            "local-mode floor. Loading the ~1.3 GB local model stack on this host will likely OOM-kill "
+            "under any concurrent workload."
+        )
+        console.print(
+            "[dim]Headed mode skips local models and uses a cloud LLM API "
+            "(~400 MB resident instead of ~1.3 GB).[/dim]"
+        )
+        console.print()
+        if non_interactive:
+            console.print(
+                "[bold red]Refusing to silently downgrade.[/bold red] Set CAM_MODE=headed (and "
+                "CAM_PROVIDER + the matching API key) in your env, or rerun `cam init` interactively."
+            )
+            raise SystemExit(2)
+        mode = Prompt.ask(
+            "Mode (no silent fallback on this host)",
+            choices=["headed", "abort"],
+            default="headed",
+        )
+        if mode == "abort":
+            console.print("[yellow]Setup aborted by user.[/yellow]")
+            raise SystemExit(0)
+
+    # Headed mode: pick provider + API key.
+    console.print()
+    console.print("[bold]Provider for headed mode:[/bold]")
+    for key, display, env_var in PROVIDER_CHOICES:
+        console.print(f"  [cyan]{key:<10}[/cyan] {display:<12} [dim]{env_var}[/dim]")
+
+    valid_keys = [key for key, _, _ in PROVIDER_CHOICES]
+    provider_key = Prompt.ask(
+        "Provider",
+        choices=valid_keys,
+        default="openai",
+    )
+
+    env_var = next(env for key, _, env in PROVIDER_CHOICES if key == provider_key)
+
+    while True:
+        api_key = Prompt.ask(
+            f"API key for {provider_key} ({env_var})",
+            password=True,
+        )
+        api_key = (api_key or "").strip()
+        if api_key:
+            break
+        console.print("[yellow]Empty key not allowed; try again.[/yellow]")
+
+    return ("headed", provider_key, api_key)
 
 
 def install_skill(agent: str) -> bool:
@@ -427,6 +565,14 @@ def run_init(non_interactive: bool = False):
                 progress.remove_task(task)
         console.print()
 
+    # Pick mode (local vs headed) based on host RAM. May SystemExit on
+    # constrained hosts in non-interactive mode, or if user picks abort.
+    mode, provider_key, api_key = prompt_mode_and_provider(non_interactive=non_interactive)
+    if mode == "headed":
+        key_path = providers.store_api_key(api_key)
+        console.print(f"  [green]✓[/green] API key saved to {key_path} (mode 0600)")
+    console.print()
+
     # Check GitHub access and ask about sync
     sync_repo = None
 
@@ -488,8 +634,8 @@ def run_init(non_interactive: bool = False):
 
                 # Write config
                 task = progress.add_task("Writing config...", total=None)
-                write_config(sync_repo, workspace_dir, machine_id)
-                console.print(f"  [green]✓[/green] Config: ~/.cam/config")
+                write_config(sync_repo, workspace_dir, machine_id, mode=mode, provider=provider_key)
+                console.print(f"  [green]✓[/green] Config: ~/.cam/config (mode={mode})")
                 progress.remove_task(task)
 
         console.print()
@@ -523,12 +669,17 @@ def run_init(non_interactive: bool = False):
     else:
         # Local only setup
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        write_config(None, workspace_dir, machine_id)
+        write_config(None, workspace_dir, machine_id, mode=mode, provider=provider_key)
 
-    # Download models if needed
-    console.print("[bold]Checking ML models...[/bold]")
-    download_models(non_interactive=non_interactive)
-    console.print()
+    # Download models — local mode only. Headed mode skips the entire local
+    # ML stack, so there's nothing to download.
+    if mode == "headed":
+        console.print(f"[dim]Headed mode (provider={provider_key}): skipping local ML model download[/dim]")
+        console.print()
+    else:
+        console.print("[bold]Checking ML models...[/bold]")
+        download_models(non_interactive=non_interactive)
+        console.print()
 
     # Ask about initial indexing
     total_sessions = sum(count for _, _, count in agents)

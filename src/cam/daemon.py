@@ -532,6 +532,18 @@ class IndexWorker:
         if self.models_loaded:
             return
 
+        from . import providers
+        if providers.is_headed():
+            # Fail loudly at startup if headed mode is misconfigured, instead
+            # of silently producing garbage titles for every indexed session.
+            providers.verify_headed_setup()
+            log.info(
+                "Headed mode active (provider=%s): skipping local ML model load",
+                providers.get_provider_key() or "unknown",
+            )
+            self.models_loaded = True  # mark "done" so we don't keep checking
+            return
+
         log.info("Loading ML models...")
         from . import segment
         segment.preload_models()
