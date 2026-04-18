@@ -31,14 +31,47 @@ curl -fsSL https://raw.githubusercontent.com/julianfleck/collective-agent-memory
 The installer will:
 
 1. Install CAM and its dependencies
-2. Download ML models (~1.5GB) for embeddings and entity extraction
-3. Detect your coding agents (Claude Code, Cursor, OpenClaw, Codex)
-4. Index existing sessions into searchable session segments
-5. Optionally set up GitHub sync for cross-machine access
-6. Install the `/cam` skill to your agents
+2. Detect your host RAM and prompt for **local** or **headed** mode (see below)
+3. Download ML models (~1.5GB) for embeddings and entity extraction (local mode only)
+4. Detect your coding agents (Claude Code, Cursor, OpenClaw, Codex)
+5. Index existing sessions into searchable session segments
+6. Optionally set up GitHub sync for cross-machine access
+7. Install the `/cam` skill to your agents
 
 **Tip:** Set `HF_TOKEN` before installing for faster model downloads (see [Configuration](#configuration)).  
 The installer + `cam init` writes the required `CAM_*` config automatically, so manual config setup is usually not needed.
+
+## Modes: Local vs Headed
+
+CAM's local mode loads ~1.3 GB of ML models (sentence-transformers, KeyBERT, GLiNER2) at daemon startup. On low-RAM hosts (laptops, small VMs) this can OOM-kill or thrash. Headed mode skips local models and routes title/keyword extraction to a cloud LLM API instead.
+
+`cam init` reads `/proc/meminfo`, compares against a **6 GB** threshold, and prompts:
+
+| Host RAM      | Behaviour                                                                              |
+| ------------- | -------------------------------------------------------------------------------------- |
+| `>= 6 GB`     | Recommends **local**, offers headed as opt-in.                                         |
+| `< 6 GB`      | Loud warning, requires explicit choice between **headed** or **abort** (no silent fallback). |
+
+In **headed** mode, `cam init` prompts for a provider (OpenAI / OpenRouter / Anthropic) and an API key. The key is written to `~/.cam/api-key` with `0600` permissions. Mode + provider are persisted to `~/.cam/config` as `CAM_MODE=` and `CAM_PROVIDER=`.
+
+### Capability Differences
+
+| Capability                       | Local                          | Headed                                        |
+| -------------------------------- | ------------------------------ | --------------------------------------------- |
+| Daemon resident memory           | ~1.3 GB                        | < 200 MB                                      |
+| Title + keywords                 | KeyBERT (local model)          | Provider's chat completion (`analyze_section`) |
+| Topic segmentation               | Embedding similarity (semantic) | Fixed-size chunks (20 messages)               |
+| Typed entity extraction (GLiNER2) | ✓                              | **Off** — no reliable cloud equivalent without a second API key. Pre-approved asymmetry; entity search returns no results in headed mode. |
+| Search backend (FTS5)            | ✓                              | ✓                                             |
+| Query expansion (Ollama)         | Optional (if Ollama installed) | Optional (if Ollama installed)                |
+
+### Switching Modes
+
+Re-run `cam init`. To override at runtime, set `CAM_MODE=local` or `CAM_MODE=headed` in your env (env wins over `~/.cam/config`).
+
+### Failure Mode
+
+In headed mode, if the API key is missing or the provider is unrecognized, the daemon exits at startup with a clear error rather than silently producing empty titles. Check `journalctl --user -u cam -e` if the daemon won't stay up.
 
 ## Usage
 
@@ -387,12 +420,17 @@ In normal usage, you do **not** need to set these manually: the installer + `cam
 Use this section to understand or override values.
 
 
-| Variable            | Description                                  | Default           |
-| ------------------- | -------------------------------------------- | ----------------- |
-| `CAM_SYNC_REPO`     | GitHub repo for sync                         | (none)            |
-| `CAM_WORKSPACE_DIR` | Segment storage directory                    | `~/.cam/sessions` |
-| `CAM_MACHINE_ID`    | Machine identifier                           | hostname          |
-| `HF_TOKEN`          | HuggingFace token for faster model downloads | (none)            |
+| Variable            | Description                                                                          | Default           |
+| ------------------- | ------------------------------------------------------------------------------------ | ----------------- |
+| `CAM_SYNC_REPO`     | GitHub repo for sync                                                                 | (none)            |
+| `CAM_WORKSPACE_DIR` | Segment storage directory                                                            | `~/.cam/sessions` |
+| `CAM_MACHINE_ID`    | Machine identifier                                                                   | hostname          |
+| `CAM_MODE`          | `local` (loads local ML models) or `headed` (routes to API). See [Modes](#modes-local-vs-headed). | `local`           |
+| `CAM_PROVIDER`      | Required when `CAM_MODE=headed`. One of `openai`, `openrouter`, `anthropic`.          | (none)            |
+| `CAM_MODEL`         | Optional override for the headed-mode model. Defaults per provider.                   | (none)            |
+| `HF_TOKEN`          | HuggingFace token for faster model downloads (local mode only)                       | (none)            |
+
+API keys live in `~/.cam/api-key` (mode `0600`), not in `~/.cam/config` — the config file is broadcast into the process environment on every CLI invocation, which is the wrong place for a secret.
 
 
 ### Faster Model Downloads

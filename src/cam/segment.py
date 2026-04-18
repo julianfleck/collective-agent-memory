@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 import argparse
 import sys
 
+from . import providers
+
 # Lazy load models
 _model = None
 _keybert_model = None
@@ -96,6 +98,11 @@ def get_gliner_model():
 
 def preload_models():
     """Preload all models at startup for better UX."""
+    if providers.is_headed():
+        # Headed mode: no local models in this process — embeddings, keywords,
+        # and entity extraction are either provider-driven or off-by-design.
+        print("Headed mode: skipping local model preload.", flush=True)
+        return
     print("Loading models...", flush=True)
     get_model()  # Embedding model
     get_keybert_model()  # KeyBERT (reuses embedding model)
@@ -274,11 +281,16 @@ def segment_session(
 ) -> Tuple[List[Tuple[int, int]], List[float]]:
     """
     Segment session into topic sections using embedding similarity.
-    
+
+    In headed mode, falls back to fixed-size chunking (no embeddings).
+
     Returns:
         - List of (start_idx, end_idx) section boundaries
-        - List of similarity scores between adjacent windows
+        - List of similarity scores between adjacent windows (empty in headed mode)
     """
+    if providers.is_headed():
+        return providers.segment_fixed(messages), []
+
     if len(messages) < window_size * 2:
         # Too few messages, return as single section
         return [(0, len(messages) - 1)], []
@@ -774,6 +786,13 @@ def check_topic_boundary(
     Returns:
         True if there's a topic boundary, False if same topic
     """
+    if providers.is_headed():
+        # No embeddings available in headed mode. Approximate the boundary
+        # by chunk size: if the new batch is at least one fixed-size chunk
+        # worth of messages, treat as a new topic; otherwise extend the
+        # current segment. Avoids thrashing many tiny segment files.
+        return len(new_messages) >= 20
+
     if len(last_messages) < window_size or len(new_messages) < window_size:
         # Not enough messages, assume same topic
         return False
@@ -809,12 +828,7 @@ def extend_segment(
         Path to the updated segment file
     """
     section_messages = all_messages[start_idx:end_idx + 1]
-    keywords = extract_keywords(section_messages)
-    entities = extract_entities(section_messages)
-
-    # Generate title from all messages
-    combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
-    title = generate_title(keywords, entities, text=combined_text)
+    title, keywords, entities = make_section_metadata(section_messages)
 
     # Generate new filename (may change due to new title)
     new_filename = f"{section_index:02d}-{slugify(title)}.md"
@@ -912,10 +926,7 @@ def incremental_index_session(
         # Write all sections
         for i, (start, end) in enumerate(sections, 1):
             section_messages = messages[start:end + 1]
-            keywords = extract_keywords(section_messages)
-            entities = extract_entities(section_messages)
-            combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
-            title = generate_title(keywords, entities, text=combined_text)
+            title, keywords, entities = make_section_metadata(section_messages)
 
             filename = f"{i:02d}-{slugify(title)}.md"
             filepath = agent_machine_dir / filename
@@ -979,10 +990,7 @@ def incremental_index_session(
             section_idx = last_section_idx + 1 + i
 
             section_messages = messages[abs_start:abs_end + 1]
-            keywords = extract_keywords(section_messages)
-            entities = extract_entities(section_messages)
-            combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
-            title = generate_title(keywords, entities, text=combined_text)
+            title, keywords, entities = make_section_metadata(section_messages)
 
             filename = f"{section_idx:02d}-{slugify(title)}.md"
             filepath = agent_machine_dir / filename
@@ -1003,6 +1011,29 @@ def incremental_index_session(
         print(f"  Incremental: new topic, created {len(sections)} segment(s)")
 
     return len(new_messages), updated_paths
+
+
+def make_section_metadata(
+    section_messages: List[Dict],
+) -> Tuple[str, List[str], Dict[str, List[str]]]:
+    """Compute (title, keywords, entities) for a section, mode-aware.
+
+    Local mode: KeyBERT keywords + GLiNER2 entities + frequency-scored title.
+    Headed mode: provider's title+keywords; entities = {} (intentional asymmetry,
+    pre-approved by @cam-lead — no reliable cloud equivalent for typed entity
+    extraction without a second API).
+    """
+    if providers.is_headed():
+        combined = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+        result = providers.analyze_section(combined)
+        title = result.get("title") or "section"
+        keywords = result.get("keywords") or []
+        return title, keywords, {}
+    keywords = extract_keywords(section_messages)
+    entities = extract_entities(section_messages)
+    combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
+    title = generate_title(keywords, entities, text=combined_text)
+    return title, keywords, entities
 
 
 def write_sections(
@@ -1044,14 +1075,7 @@ def write_sections(
 
     for i, (start, end) in enumerate(sections, 1):
         section_messages = messages[start:end + 1]
-        keywords = extract_keywords(section_messages)
-        entities = extract_entities(section_messages)
-
-        # Combine message text for title scoring
-        combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
-
-        # Generate smart title using frequency scoring
-        title = generate_title(keywords, entities, text=combined_text)
+        title, keywords, entities = make_section_metadata(section_messages)
 
         # Generate filename
         filename = f"{i:02d}-{slugify(title)}.md"
@@ -1090,10 +1114,7 @@ def print_sections(messages: List[Dict], sections: List[Tuple[int, int]]):
 
     for i, (start, end) in enumerate(sections, 1):
         section_messages = messages[start:end + 1]
-        keywords = extract_keywords(section_messages)
-        entities = extract_entities(section_messages)
-        combined_text = " ".join(msg.get("text", "")[:1000] for msg in section_messages)
-        title = generate_title(keywords, entities, text=combined_text)
+        title, keywords, entities = make_section_metadata(section_messages)
 
         print(f"\nSection {i}: Messages {start}-{end} ({end - start + 1} messages)")
         print(f"  Title: {title.replace('-', ' ')}")
