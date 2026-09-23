@@ -851,6 +851,28 @@ def cmd_segment(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_indexed_session_state(state_file: Path) -> dict[str, float]:
+    """Read indexed session paths and mtimes from legacy or timestamped state."""
+    indexed = {}
+    if not state_file.exists():
+        return indexed
+
+    for line in state_file.read_text().splitlines():
+        if not line:
+            continue
+        parts = line.rsplit(":", 1)
+        if len(parts) == 2 and parts[1].replace(".", "").isdigit():
+            indexed[parts[0]] = float(parts[1])
+        else:
+            indexed[line] = 0.0
+    return indexed
+
+
+def read_indexed_session_paths(state_file: Path) -> set[str]:
+    """Read only the paths from an indexed-session state file."""
+    return set(read_indexed_session_state(state_file))
+
+
 def cmd_index(args: argparse.Namespace) -> int:
     """Index new sessions from all sources.
 
@@ -877,9 +899,8 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     # Track processed sessions
     state_file = output_dir / ".indexed_sessions"
-    indexed = set()
-    if state_file.exists() and not args.force:
-        indexed = set(state_file.read_text().strip().split('\n'))
+    indexed_state = read_indexed_session_state(state_file)
+    indexed = set() if args.force else set(indexed_state)
 
     # Find all sessions across all directories
     all_sessions = []
@@ -920,9 +941,11 @@ def cmd_index(args: argparse.Namespace) -> int:
     errors = 0
     total = len(new_sessions)
 
-    def save_state():
+    def mark_indexed(session_file: Path):
         output_dir.mkdir(parents=True, exist_ok=True)
-        state_file.write_text('\n'.join(sorted(indexed)))
+        indexed_state[str(session_file)] = session_file.stat().st_mtime
+        lines = [f"{path}:{mtime}" for path, mtime in sorted(indexed_state.items())]
+        state_file.write_text('\n'.join(lines))
 
     with Progress(
         SpinnerColumn(),
@@ -937,9 +960,13 @@ def cmd_index(args: argparse.Namespace) -> int:
             try:
                 session_meta, messages = segment.load_session_messages(session_file)
 
+                if not messages:
+                    errors += 1
+                    progress.advance(task)
+                    continue
+
                 if len(messages) < 6:
-                    indexed.add(str(session_file))
-                    save_state()
+                    mark_indexed(session_file)
                     progress.advance(task)
                     continue
 
@@ -950,14 +977,11 @@ def cmd_index(args: argparse.Namespace) -> int:
                     machine_id=machine_id
                 )
 
-                indexed.add(str(session_file))
                 count += 1
-                save_state()
+                mark_indexed(session_file)
 
-            except Exception as e:
+            except Exception:
                 errors += 1
-                indexed.add(str(session_file))
-                save_state()
 
             progress.advance(task)
 
