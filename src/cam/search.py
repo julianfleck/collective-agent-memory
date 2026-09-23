@@ -4,7 +4,7 @@ import math
 import sqlite3
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -182,14 +182,19 @@ class SearchIndex:
                     entities_list.append(str(values))
         entities = ' '.join(entities_list)
 
+        def serialize_datetime(value):
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            return value
+
         return {
             'path': rel_path,
             'session_id': frontmatter.get('session_id', ''),
             'agent': agent,
             'machine': machine,
-            'date': frontmatter.get('date', ''),
-            'first_timestamp': frontmatter.get('first_timestamp', ''),
-            'last_timestamp': frontmatter.get('last_timestamp', ''),
+            'date': serialize_datetime(frontmatter.get('date', '')),
+            'first_timestamp': serialize_datetime(frontmatter.get('first_timestamp', '')),
+            'last_timestamp': serialize_datetime(frontmatter.get('last_timestamp', '')),
             'title': frontmatter.get('title', ''),
             'keywords': keywords,
             'entities': entities,
@@ -413,14 +418,14 @@ class SearchIndex:
             params.append(machine)
 
         if since:
-            sql += " AND s.first_timestamp >= ?"
+            sql += " AND julianday(s.first_timestamp) >= julianday(?)"
             params.append(since.isoformat())
 
         # Order by specified sort_order
         if sort_order in ('date', 'newest'):
-            sql += " ORDER BY s.first_timestamp DESC LIMIT ?"
+            sql += " ORDER BY julianday(s.first_timestamp) DESC LIMIT ?"
         elif sort_order == 'oldest':
-            sql += " ORDER BY s.first_timestamp ASC LIMIT ?"
+            sql += " ORDER BY julianday(s.first_timestamp) ASC LIMIT ?"
         else:
             # Default: score with strong recency boost
             # Exponential decay: score * (1 + 2^(-days/3))
@@ -635,7 +640,7 @@ class SearchIndex:
                 entities,
                 keywords
             FROM segments
-            WHERE first_timestamp >= ?
+            WHERE julianday(first_timestamp) >= julianday(?)
         """
         params = [since.isoformat()]
 
@@ -647,7 +652,7 @@ class SearchIndex:
             sql += " AND machine = ?"
             params.append(machine)
 
-        sql += " ORDER BY first_timestamp DESC LIMIT ?"
+        sql += " ORDER BY julianday(first_timestamp) DESC LIMIT ?"
         params.append(limit)
 
         results = []
