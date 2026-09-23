@@ -39,7 +39,6 @@ from cam.search import SearchIndex
 
 # Configuration
 IDLE_TIMEOUT = 300  # 5 minutes of no activity before queueing
-DEBOUNCE_SECONDS = 5  # Wait for rapid changes to settle
 QUEUE_POLL_INTERVAL = 10  # Check queue every 10 seconds when idle
 QUEUE_POLL_INTERVAL_ACTIVE = 2  # Check every 2 seconds when actively processing
 SESSION_TIMEOUT = 300  # 5 minutes max per session before giving up
@@ -78,6 +77,14 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 log = logging.getLogger('cam-daemon')
+
+
+def set_daemon_process_title(title: str = "cam-daemon") -> None:
+    """Give the long-running worker an identifiable OS process title."""
+    from setproctitle import setproctitle, setthreadtitle
+
+    setproctitle(title)
+    setthreadtitle(title)
 
 
 # =============================================================================
@@ -491,9 +498,9 @@ class SessionWatcher(FileSystemEventHandler):
 
             # Wait for debounce period
             idle_time = (now - last_change).total_seconds()
-            if idle_time >= DEBOUNCE_SECONDS:
+            if idle_time >= INCREMENTAL_DEBOUNCE:
                 # Check if needs (re)indexing based on mtime
-                if needs_reindex(path, self.indexed):
+                if needs_incremental_index(path, self.indexed):
                     to_queue.append(path)
                 self.pending_paths.discard(path)
                 del self.last_change[path]
@@ -559,6 +566,10 @@ class IndexWorker:
         def do_full_index():
             session_meta, messages = segment.load_session_messages(session_file)
 
+            if not messages:
+                log.error(f"No supported messages found in {session_file.name}")
+                return None
+
             if len(messages) < 6:
                 log.info(f"Skipping {session_file.name} ({len(messages)} messages)")
                 return (0, [])  # Skipped, no paths
@@ -589,7 +600,11 @@ class IndexWorker:
                     future = executor.submit(do_full_index)
 
                 try:
-                    result_count, written_paths = future.result(timeout=SESSION_TIMEOUT)
+                    result = future.result(timeout=SESSION_TIMEOUT)
+                    if result is None:
+                        return False
+
+                    result_count, written_paths = result
                     mark_session_indexed(session_path)
 
                     if result_count > 0:
@@ -605,14 +620,10 @@ class IndexWorker:
 
                 except FuturesTimeoutError:
                     log.error(f"Timeout indexing {session_file.name} (>{SESSION_TIMEOUT}s)")
-                    # Mark as indexed to avoid infinite retry
-                    mark_session_indexed(session_path)
                     return False
 
         except Exception as e:
             log.error(f"Failed to index {session_file.name}: {e}")
-            # Mark as indexed to avoid infinite retry
-            mark_session_indexed(session_path)
             return False
 
     def update_search_index(self, segment_paths: List[Path]):
@@ -804,7 +815,7 @@ def is_daemon_running() -> bool:
     system = platform.system()
     if system == "Darwin":
         result = subprocess.run(
-            ["launchctl", "list", "net.julianfleck.cam"],
+            ["launchctl", "print", f"gui/{os.getuid()}/net.julianfleck.cam"],
             capture_output=True
         )
         return result.returncode == 0
@@ -870,6 +881,7 @@ def run_daemon(
 
     Both run in the same process to share models in memory (~1.3GB).
     """
+    set_daemon_process_title()
     watch_paths = get_watch_paths()
 
     if not watch_paths:
@@ -1384,7 +1396,7 @@ def is_watchdog_running() -> bool:
 
     if system == "Darwin":
         result = subprocess.run(
-            ["launchctl", "list", "net.julianfleck.cam.watchdog"],
+            ["launchctl", "print", f"gui/{os.getuid()}/net.julianfleck.cam.watchdog"],
             capture_output=True
         )
         return result.returncode == 0

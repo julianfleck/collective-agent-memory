@@ -134,14 +134,14 @@ def extract_message_text(msg: Dict) -> str:
     if isinstance(content, str):
         return content.strip()
 
-    # OpenClaw / Claude Code array format
+    # OpenClaw / Claude Code / Codex array format
     if not isinstance(content, list):
         return ""
 
     texts = []
     for item in content:
         if isinstance(item, dict):
-            if item.get("type") == "text":
+            if item.get("type") in ("text", "input_text", "output_text"):
                 texts.append(item.get("text", ""))
         elif isinstance(item, str):
             texts.append(item)
@@ -168,9 +168,10 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
     Load messages from a session JSONL file.
     Returns (session_metadata, list of message dicts with index, role, text, timestamp).
 
-    Supports both OpenClaw and Claude Code session formats:
+    Supports OpenClaw, Claude Code, Cursor, and Codex session formats:
     - OpenClaw: type="session" for metadata, type="message" for messages
     - Claude Code: type="user"/"assistant" at top level, or message.role for role
+    - Codex: type="session_meta" and payload-wrapped response_item messages
     """
     session_meta = {
         "source_path": str(session_path),
@@ -194,12 +195,31 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
                     })
                     continue
 
+                # Capture session metadata (Codex rollout format)
+                if msg_type == "session_meta":
+                    payload = data.get("payload", {})
+                    if isinstance(payload, dict):
+                        session_meta.update({
+                            "session_id": payload.get("id", ""),
+                            "version": payload.get("version", ""),
+                            "started": payload.get("timestamp", data.get("timestamp", "")),
+                            "cwd": payload.get("cwd", ""),
+                        })
+                    continue
+
                 # Skip non-message types
                 if msg_type in ("queue-operation", "summary", "tool_result"):
                     continue
 
-                # Get message object and role
-                message = data.get("message", {})
+                # Get message object and role. Codex wraps messages in payload;
+                # event_msg records are deliberately ignored because they duplicate
+                # the canonical response_item messages.
+                if msg_type == "response_item":
+                    message = data.get("payload", {})
+                    if not isinstance(message, dict) or message.get("type") != "message":
+                        continue
+                else:
+                    message = data.get("message", {})
                 if not isinstance(message, dict):
                     continue
 
@@ -226,7 +246,7 @@ def load_session_messages(session_path: Path) -> Tuple[Dict, List[Dict]]:
                         "cwd": data.get("cwd", "")
                     })
 
-                text = extract_message_text(data)
+                text = extract_message_text({"message": message})
                 if text:
                     timestamp = data.get("timestamp", "")
                     messages.append({
