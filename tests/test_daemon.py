@@ -130,6 +130,20 @@ class ProcessTitleTests(unittest.TestCase):
         set_process_title.assert_called_once_with("cam-daemon")
         set_thread_title.assert_called_once_with("cam-daemon")
 
+    def test_watchdog_recognizes_titled_and_legacy_daemons(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            script_path = Path(tmp_dir) / "cam-watchdog.sh"
+            with (
+                patch.object(daemon, "WATCHDOG_SCRIPT_PATH", script_path),
+                patch.object(daemon.shutil, "which", return_value="/tmp/cam"),
+            ):
+                daemon.write_watchdog_script()
+
+            script = script_path.read_text()
+
+        self.assertIn('pgrep -x "cam-daemon"', script)
+        self.assertIn('pgrep -f "cam daemon"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

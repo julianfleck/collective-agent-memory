@@ -1199,7 +1199,7 @@ LOG_FILE="$HOME/.cam/watchdog.log"
 log() {{ echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"; }}
 
 # Check if daemon process is running
-if ! pgrep -f "cam daemon" > /dev/null 2>&1; then
+if ! pgrep -x "cam-daemon" > /dev/null 2>&1 && ! pgrep -f "cam daemon" > /dev/null 2>&1; then
     log "WARN: Daemon not running, starting..."
     "{cam_bin}" daemon start
     exit 0
