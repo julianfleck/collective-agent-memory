@@ -67,6 +67,37 @@ class SessionWatcherTests(unittest.TestCase):
         self.assertNotIn(str(session_path), watcher.pending_paths)
 
 
+class QueueSessionsTests(unittest.TestCase):
+    def test_force_queue_forgets_existing_index_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / ".indexed_sessions"
+            forced_path = str(Path(tmp_dir) / "forced.jsonl")
+            preserved_path = str(Path(tmp_dir) / "preserved.jsonl")
+            state_file.write_text(
+                f"{forced_path}:1790029577.0\n"
+                f"{preserved_path}:1790029588.0\n"
+            )
+
+            with (
+                patch.object(daemon, "STATE_FILE", state_file),
+                patch.object(daemon, "_indexed_sessions_cache", {}),
+                patch.object(daemon, "_indexed_sessions_mtime", 0.0),
+                patch.object(daemon, "queue_add", return_value=True) as queue_add,
+            ):
+                queued = daemon.queue_sessions_for_indexing(
+                    [Path(forced_path)],
+                    priority=True,
+                    force=True,
+                )
+
+            state = state_file.read_text().splitlines()
+
+        self.assertEqual(queued, 1)
+        queue_add.assert_called_once_with(forced_path, priority=True)
+        self.assertNotIn(f"{forced_path}:1790029577.0", state)
+        self.assertIn(f"{preserved_path}:1790029588.0", state)
+
+
 class LaunchdStatusTests(unittest.TestCase):
     def test_checks_the_user_launchd_domain(self):
         completed = subprocess.CompletedProcess([], 0)

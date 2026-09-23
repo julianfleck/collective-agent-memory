@@ -795,7 +795,20 @@ def queue_sessions_for_indexing(
     Returns:
         Number of sessions queued
     """
-    indexed = get_indexed_sessions() if not force else set()
+    global _indexed_sessions_cache, _indexed_sessions_mtime
+
+    indexed = get_indexed_sessions().copy()
+    if force:
+        forced_paths = {str(session_file) for session_file in session_files}
+        removed = forced_paths.intersection(indexed)
+        if removed:
+            for path in removed:
+                indexed.pop(path, None)
+            lines = [f"{path}:{mtime}" for path, mtime in sorted(indexed.items())]
+            STATE_FILE.write_text('\n'.join(lines))
+            _indexed_sessions_cache = indexed
+            _indexed_sessions_mtime = STATE_FILE.stat().st_mtime
+
     queued = 0
 
     for session_file in session_files:
